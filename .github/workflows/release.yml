@@ -102,9 +102,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
+
+          # 0.x 或带预发布后缀（如 -rc1）→ 自动标记为 pre-release
+          prerelease=""
+          case "${ver}" in
+            0.*|*-*) prerelease="--prerelease" ;;
+          esac
+          echo "版本 ${ver} · 预发布标记: ${prerelease:-无}"
+
           ls -l artifacts
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
+          gh release create "${tag}" \
+            --title "${tag}" \
             --generate-notes \
+            ${prerelease} \
             artifacts/* \
-          || gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber
+          || gh release upload "${tag}" artifacts/* --clobber
+
+          # 把「能做什么 / 不能做什么」的状态说明前置到自动生成的变更列表之前
+          gh release view "${tag}" --json body --jq .body > /tmp/body.md
+          {
+            cat .github/release-preamble.md
+            cat /tmp/body.md
+          } > /tmp/notes.md
+          gh release edit "${tag}" --notes-file /tmp/notes.md
+
+          echo "--- Release 页面预览（前 25 行）---"
+          head -25 /tmp/notes.md

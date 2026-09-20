@@ -1,5 +1,7 @@
 # Zigent
 
+[![CI](https://github.com/chhuax/Zigent/actions/workflows/ci.yml/badge.svg)](https://github.com/chhuax/Zigent/actions/workflows/ci.yml)
+
 **用 Zig 从零实现的编码 Agent 内核** —— 对标 Claude Code：读写代码、执行命令、跨轮次保持上下文，并把过程实时流式吐给客户端。
 
 **A coding-agent kernel built from scratch in Zig** — in the spirit of Claude Code: it reads and writes code, runs commands, keeps context across turns, and streams everything to the client in real time.

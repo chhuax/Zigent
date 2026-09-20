@@ -1,0 +1,106 @@
+# Zigent CI
+#
+# 这个项目的核心卖点之一是「单机交叉编译出全平台产物」，所以 CI 分成三类作业：
+#   1. test    —— 在 Linux / macOS 上跑单元测试、架构守卫、构建与交付契约冒烟
+#   2. cross   —— 在单台 Linux 上交叉编译出四个平台的产物（把卖点变成可核对的事实）
+#   3. windows —— 已知未支持，非阻塞；见下方说明
+#
+# Windows 说明：`src/util/io.zig`（唯一的 OS 边界）用了 `std.posix.HOST_NAME_MAX`
+# 与 `std.posix.sigaction`，二者在 Windows 上不存在。补 Windows 分支是独立工作量，
+# 当前按 AGENTS.md 决策 #6「Windows / WSL 延后」处理：作业保留并标记为非阻塞，
+# 这样差距一直可见，等实现落地后它会自动转绿。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一 ref 的旧运行自动取消
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  test:
+    name: test · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: 版本
+        run: zig version
+
+      - name: 单元测试（12 模块 · 537 用例）
+        run: zig build test --summary all
+
+      - name: 架构约束检查（std.posix 隔离 / common 纯逻辑）
+        run: zig build guard
+
+      - name: 构建 Debug + ReleaseSafe
+        run: |
+          zig build
+          zig build -Doptimize=ReleaseSafe
+          ls -l zig-out/bin/
+
+      - name: 交付契约冒烟（12 项）
+        env:
+          ZIG: zig
+        run: bash tests/smoke.sh
+
+  cross:
+    name: cross · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-macos
+          - aarch64-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: 交叉编译 ${{ matrix.target }}
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: 产物
+        run: ls -l zig-out/bin/
+
+  windows:
+    name: windows · 已知未支持（非阻塞）
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: 尝试构建与测试（预期失败）
+        run: zig build test --summary all

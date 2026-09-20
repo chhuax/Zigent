@@ -404,7 +404,7 @@ const testing = std.testing;
 
 test "paths: 目录契约 —— 用户根 .zigent / 工作区根 .agents" {
     const gpa = testing.allocator;
-    const p = Paths{ .home = "/Users/me", .cwd = "/data/workspace/zigent" };
+    const p = Paths{ .home = "/Users/me", .cwd = "/repo" };
 
     const ud = try p.userDir(gpa);
     defer gpa.free(ud);
@@ -412,7 +412,7 @@ test "paths: 目录契约 —— 用户根 .zigent / 工作区根 .agents" {
 
     const wd = try p.workspaceDir(gpa);
     defer gpa.free(wd);
-    try testing.expectEqualStrings("/data/workspace/zigent/.agents", wd);
+    try testing.expectEqualStrings("/repo/.agents", wd);
     try testing.expect(std.mem.indexOf(u8, wd, ".zigent") == null);
     try testing.expectEqualStrings(".agents", workspaceDirName());
 }

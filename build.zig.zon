@@ -1,0 +1,14 @@
+.{
+    .name = .zigent,
+    .version = "0.1.0",
+    .license = .apache_2_0,
+    .fingerprint = 0xcba2af450549b92c,
+    // 开发基线：0.16.0（已实测的最新稳定版）。
+    // 0.17 仍是 dev，作为跟踪目标 —— 详见 AGENTS.md §5。
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

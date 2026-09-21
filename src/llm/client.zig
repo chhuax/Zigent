@@ -138,9 +138,9 @@ pub const RetryPolicy = struct {
         return @intFromFloat(@min(base, @as(f64, @floatFromInt(self.max_delay_ms))));
     }
 
-    /// ★ `Retry-After` 响应头 > 异常携带 > 本地退避；仍受 cap 约束。
-    pub fn delayForError(self: RetryPolicy, err: AttemptError, attempt: u32, io: Io) u64 {
-        if (err.retry_after_ms) |ms| return @min(ms, self.max_delay_ms);
+    /// **base + 抖动**（不含 `Retry-After`）。引擎层的恢复阶梯直接用这一条 ——
+    /// 它和传输层共用同一个 `RetryPolicy`，只是实例不同（见 `recovery`）。
+    pub fn delayWithJitter(self: RetryPolicy, attempt: u32, io: Io) u64 {
         const base = self.delayFor(attempt);
         if (self.jitter_ratio <= 0.0) return base;
         const jitter: u64 = @intFromFloat(@as(f64, @floatFromInt(base)) * self.jitter_ratio);
@@ -149,6 +149,12 @@ pub const RetryPolicy = struct {
         util.io.randomBytes(io, &buf);
         const r = std.mem.readInt(u64, &buf, .little);
         return @min(base - jitter + (r % (jitter * 2 + 1)), self.max_delay_ms);
+    }
+
+    /// ★ `Retry-After` 响应头 > 异常携带 > 本地退避；仍受 cap 约束。
+    pub fn delayForError(self: RetryPolicy, err: AttemptError, attempt: u32, io: Io) u64 {
+        if (err.retry_after_ms) |ms| return @min(ms, self.max_delay_ms);
+        return self.delayWithJitter(attempt, io);
     }
 };
 

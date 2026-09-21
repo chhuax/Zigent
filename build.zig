@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
     const engine = mk(b, target, optimize, "engine");
     const server = mk(b, target, optimize, "server");
     const proto = mk(b, target, optimize, "client_proto");
+    const cli = mk(b, target, optimize, "cli");
 
     // L0′ / L0 —— 零内部依赖
     //   注意：这里**故意没有** common.addImport("util", util)。
@@ -52,6 +53,19 @@ pub fn build(b: *std.Build) void {
     // L4 协议与入口
     link(server, &.{ .{ "common", common }, .{ "engine", engine }, .{ "config", config }, .{ "util", util }, .{ "llm", llm } });
     link(proto, &.{ .{ "common", common }, .{ "engine", engine }, .{ "util", util } });
+    link(cli, &.{ .{ "common", common }, .{ "server", server }, .{ "client_proto", proto }, .{ "engine", engine }, .{ "config", config }, .{ "util", util }, .{ "llm", llm } });
+
+    // ── 可执行 ──
+    const exe = b.addExecutable(.{
+        .name = "zigent",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    exe.root_module.addImport("cli", cli);
+    b.installArtifact(exe);
 
     // ── 测试：**每个模块各自成一个测试产物** ──
     //   这一步是铁律强制的关键：只有把每个模块当测试根，Zig 才会**完整分析它的文件**。
@@ -60,12 +74,18 @@ pub fn build(b: *std.Build) void {
     const mods = .{
         .{ "util", util }, .{ "common", common }, .{ "llm", llm }, .{ "config", config },
         .{ "perm", perm }, .{ "tools", tools }, .{ "memory", memory }, .{ "engine", engine },
-        .{ "server", server }, .{ "client_proto", proto },
+        .{ "server", server }, .{ "client_proto", proto }, .{ "cli", cli },
     };
     inline for (mods) |m| {
         const t = b.addTest(.{ .root_module = m[1] });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
+
+    // ── run：`zig build run -- serve` / `zig build run -- --print "…"` ──
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |a| run_cmd.addArgs(a);
+    b.step("run", "构建并运行 zigent").dependOn(&run_cmd.step);
 
     // ── guard：把两条"只写进文档"的架构约束变成**可执行检查** ──
     //   文档 11 §10 验收：

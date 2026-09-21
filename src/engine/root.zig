@@ -23,6 +23,7 @@ const util = @import("util");
 pub const rt = @import("rt.zig");
 pub const turn = @import("turn.zig");
 pub const budget = @import("budget.zig");
+pub const recovery = @import("recovery.zig");
 pub const compact = @import("compact.zig");
 pub const prompt = @import("prompt.zig");
 pub const tool_exec = @import("tool_exec.zig");

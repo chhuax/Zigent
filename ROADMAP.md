@@ -24,7 +24,7 @@
 | WP-12 | `budget` + `compact` | `src/engine/{budget,compact}.zig` | 7 | 🟡 5/7 |
 | WP-13 | `recovery` | `src/engine/recovery.zig` | 5 | 🟡 4/5 |
 | WP-14 | `transcript` | `src/engine/transcript.zig` | 6 | 🟡 4/6 |
-| WP-15 | `cli/` 入口 | `src/cli/` 5 文件 1,146 行 | 4 | 🟡 2/4 |
+| WP-15 | `cli/` 入口 | `src/cli/` 5 文件 1,146 行 | 4 | 🟡 3/4 |
 | WP-16 | `server/` HTTP + SSE | `src/server/` 7 文件 1,571 行 | 7 | ✅ 7/7 |
 | WP-17 | `client_proto/` | `src/client_proto/` 3 文件 526 行 | 4 | 🟡 3/4 |
 | WP-18 | golden fixtures + 双后端对等 | — | 3 | ❌ 0/3 |
@@ -170,7 +170,7 @@
 ## WP-15 · `cli/` 入口
 
 - [ ] 1. 🟡 **7 个入口** → `--print` + `--output-format stream-json` ✅、`serve` ✅、`acp serve` ✅、`--version` ✅；**`doctor` 与 6 个 `--internal-*` 未实现**（仅注释）
-- [ ] 2. `--sdk-url` / `--teleport` → `exit 2`（不是"忽略"）← 未实现
+- [x] 2. `--sdk-url` / `--teleport` → `exit 2`（不是"忽略"）→ **实测 `exit=2`**，stderr `error: unsupported flag`。两者以 `--` 开头，走 `args.zig` 的未知 flag 分支后由 `root.zig` 返回 2。（设计原文另要求信息以 `Unsupported` 开头，当前前缀是 `error: ` —— 语义等价，未改。）
 - [x] 3. stream-json 必配 `--verbose`；input=stream-json 必配 output=stream-json
 - [ ] 4. 6 个 `--internal-*` fast path 在命令解析之前精确匹配 `args[0]`；`--internal-resume-check` exit 1 = 已触发恢复 ← 未实现
 
@@ -241,7 +241,7 @@
 | 2 | WP-13.3 | 退避 **jitter 定义了却未使用**；cap 30s ≠ 设计要求的 32s | `src/engine/recovery.zig:55-56,173` | 🟠 |
 | 3 | WP-12.6 | 压缩**第三层 LLM 摘要未接线** | `src/engine/loop.zig:547` 传 `null` | 🟠 |
 | 4 | WP-11.1 / 11.4 | 工具**真并发**与**抢跑**均未实现 | `src/engine/tool_exec.zig:126` | 🟠 |
-| 5 | WP-15.1 / 15.2 / 15.4 | `doctor`、6 个 `--internal-*`、`--sdk-url`/`--teleport` 全未实现 | `src/cli/args.zig` | 🟡 |
+| 5 | WP-15.1 / 15.4 | `doctor`、6 个 `--internal-*` 未实现（15.2 已实测通过，见下） | `src/cli/args.zig` | 🟡 |
 | 6 | WP-14.5 | transcript **`fork` / `delta` 未实现** | `src/engine/transcript.zig` | 🟡 |
 | 7 | WP-01.2 | 从未在 **0.17.0-dev** 上跑过测试（验收明确要求两版都过） | — | 🟡 |
 

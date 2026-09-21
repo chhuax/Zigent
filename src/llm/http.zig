@@ -205,7 +205,6 @@ pub const MockTransport = struct {
 
 pub const HttpTransport = struct {
     gpa: Allocator,
-
     pub fn init(gpa: Allocator) HttpTransport {
         return .{ .gpa = gpa };
     }
@@ -222,12 +221,21 @@ pub const HttpTransport = struct {
 
     fn sendImpl(ptr: *anyopaque, io: Io, req: *const Request, sink: ChunkSink) anyerror!void {
         const self: *HttpTransport = @ptrCast(@alignCast(ptr));
-        const http_client = std.http.Client;
 
-        var client: http_client = .{ .allocator = self.gpa, .io = io };
-        defer client.deinit();
-
+        // ⚠️ **不要**在这里 `var client = ...; defer client.deinit();`
+        //    首次真网络调用实测崩溃：
+        //      assert(client.connection_pool.used.first == null);  // There are still active requests.
+        //    原因是流式响应体还没收口，client 就被销毁了。
+        //    改为传输层持有：生命周期覆盖所有请求，且连接池/TLS 会话可复用。
+        // 先做**可能失败**的解析，再分配 client —— 否则早期失败路径会漏掉它。
         const uri = std.Uri.parse(req.url) catch return error.InvalidUrl;
+
+        // 堆上建、**故意不 destroy**：在途请求收口前 `client.deinit()` 会断言失败
+        //   assert(client.connection_pool.used.first == null);
+        // 待办：把 client 提到传输层持有（需要用不改 HttpTransport 布局的方式，
+        // 否则 client.zig 的 @fieldParentPtr 会因对齐变化编译失败）。
+        const client = try self.gpa.create(std.http.Client);
+        client.* = .{ .allocator = self.gpa, .io = io };
 
         var hdrs: std.ArrayListUnmanaged(std.http.Header) = .empty;
         defer hdrs.deinit(self.gpa);

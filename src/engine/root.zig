@@ -21,10 +21,14 @@ const config = @import("config");
 const util = @import("util");
 
 pub const rt = @import("rt.zig");
+pub const turn = @import("turn.zig");
 pub const host = @import("host.zig");
 pub const sink = @import("sink.zig");
 
 /// ★ 配对不变量的类型化载体（文档 04 §13 命名裁决：`engine.Turn`）
+pub const Turn = turn.Turn;
+pub const PairingError = turn.PairingError;
+pub const repairMessages = turn.repairMessages;
 pub const Rt = rt.Rt;
 pub const EventSink = sink.EventSink;
 pub const CollectingSink = sink.CollectingSink;

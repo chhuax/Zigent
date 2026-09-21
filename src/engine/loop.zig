@@ -46,6 +46,31 @@ const pairing = turn_mod;
 pub const Turn = turn_mod.Turn;
 pub const Message = common.Message;
 
+/// 组装 wire 用的工具清单：把 registry 的 Spec 变成 `llm.ToolSpec`。
+///
+/// ⚠️ **必须复制字符串内容，不能只复制指针。** 曾经的写法是
+/// `defer tools.freeModelSpecs(...)` 之后把 `s.schema_json` 的指针直接存进返回值 ——
+/// `defer` 在 `return` 求值之后执行，返回的切片里全是**已释放内存的指针**。
+/// 症状：真实 provider 报
+///   `tools[0].function.parameters: expected value at line 1 column 12288`
+/// （body 里的 tool schema 是垃圾字节）。mock 测试碰不到它，因为 MockTransport
+/// 不解析我们自己发出的 body。
+///
+/// 提到顶层是为了**可被测试直接调用**：`request_shape_test.zig` 会断言返回的
+/// `schema_json` 与源 Spec **不是同一块内存**（只复制指针就会挂在那条断言上）。
+pub fn dupToolSpecs(a: Allocator, reg: *tools.Registry) ![]llm.ToolSpec {
+    const specs = try reg.modelSpecs(a);
+    const out = try a.alloc(llm.ToolSpec, specs.len);
+    for (specs, 0..) |s, i| {
+        out[i] = .{
+            .name = try a.dupe(u8, s.name),
+            .description = try a.dupe(u8, s.description),
+            .schema_json = try a.dupe(u8, s.schema_json),
+        };
+    }
+    return out;
+}
+
 pub const SessionOptions = struct {
     /// 恢复已有会话时传入 transcript 路径
     transcript_path: ?[]const u8 = null,
@@ -274,7 +299,6 @@ pub const Session = struct {
                 .max_tokens = self.budget.output_reserve,
                 .temperature = self.rt.settings.temperature,
             };
-            defer gpa.free(req.tools);
 
             try self.sink.send(.{ .stream_request_start = .{
                 .request_id = self.rt.session_id,
@@ -476,14 +500,9 @@ pub const Session = struct {
         return total;
     }
 
+    /// 组装 wire 用的工具清单（会话 arena 版）。
     fn toolSpecs(self: *Session) ![]llm.ToolSpec {
-        const specs = try self.registry.modelSpecs(self.gpa);
-        defer tools.freeModelSpecs(self.gpa, specs);
-        const out = try self.gpa.alloc(llm.ToolSpec, specs.len);
-        for (specs, 0..) |s, i| {
-            out[i] = .{ .name = s.name, .description = s.description, .schema_json = s.schema_json };
-        }
-        return out;
+        return dupToolSpecs(self.arena.allocator(), self.registry);
     }
 
     fn buildSystemPrompt(self: *Session) !void {

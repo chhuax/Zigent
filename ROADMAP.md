@@ -21,7 +21,7 @@
 | WP-09 | `engine/pairing`（`Turn`） | `src/engine/turn.zig` | 4 | ✅ 4/4 |
 | WP-10 | `engine/prompt` | `src/engine/prompt.zig` | 4 | ✅ 4/4 |
 | WP-11 | `engine/tool_exec` | `src/engine/tool_exec.zig` | 5 | 🟡 3/5 |
-| WP-12 | `budget` + `compact` | `src/engine/{budget,compact}.zig` | 7 | 🟡 5/7 |
+| WP-12 | `budget` + `compact` | `src/engine/{budget,compact}.zig` | 7 | 🟡 6/7 |
 | WP-13 | `recovery` | `src/engine/recovery.zig` | 5 | 🟡 4/5 |
 | WP-14 | `transcript` | `src/engine/transcript.zig` | 6 | 🟡 5/6 |
 | WP-15 | `cli/` 入口 | `src/cli/` 5 文件 1,146 行 | 4 | 🟡 3/4 |
@@ -145,8 +145,8 @@
 - [x] 3. ⚠️ `AUTOCOMPACT_BUFFER_TOKENS = 40_000`（不是参考文档说的 13,000）→ `src/engine/budget.zig:18`
 - [x] 4. ratio 非对称更新的分母必须是原始估算
 - [x] 5. 压缩成功判据 = 最终 provider 上下文确实缩小
-- [ ] 6. 🟡 **压缩三层梯度（零成本优先）** → 第 1/2 层 ✅；**第 3 层 LLM 摘要未接线**（`loop.zig:547` 传 `null`）
-- [ ] 7. 🟡 大结果落盘 + `<persisted-output>` 占位；`Read` 结果**禁止二次落盘** → 落盘 ✅（`truncate.zig:38`）；二次落盘守卫未核验
+- [x] 6. **压缩三层梯度（零成本优先）** → 第 1/2 层 ✅；第 3 层已接线（`SummaryHost` 发起 LLM 调用 + 续接消息前置注入）
+- [ ] 7. 🟡 大结果落盘 + `<persisted-output>` 占位；`Read` 结果**禁止二次落盘** → 落盘 ✅（`truncate.zig:38`）；二次落盘守卫**仍未核验**
 
 ## WP-13 · `recovery`
 
@@ -238,7 +238,6 @@
 | # | WP | 缺口 | 位置 / 证据 | 严重度 |
 |:--:|---|---|---|:--:|
 | 1 | WP-03.1 | **真实 provider 未跑通**：仅剩「用真实凭据跑 3 轮」这一步。代码级阻塞已全部清除（use-after-free、档位名 `default`、连接未归还、stream-json 输出写坏 —— 见下方「已修复」），本机 mock provider 的真实 HTTP 链路已跑通 | `src/llm/`、`src/engine/loop.zig`、`src/cli/` | 🟠 |
-| 3 | WP-12.6 | 压缩**第三层 LLM 摘要未接线** | `src/engine/loop.zig:547` 传 `null` | 🟠 |
 | 4 | WP-11.1 / 11.4 | 工具**真并发**与**抢跑**均未实现 | `src/engine/tool_exec.zig:126` | 🟠 |
 | 5 | WP-15.1 / 15.4 | `doctor`、6 个 `--internal-*` 未实现（15.2 已实测通过，见下） | `src/cli/args.zig` | 🟡 |
 | 6 | WP-14.5 | transcript 的 **`delta` 待确认**：设计里无定义，且 02/17 两份文档结论矛盾（X vs P1）。`fork` 已实现（`forkTo`） | `src/engine/transcript.zig` | 🟡 |
@@ -249,6 +248,7 @@
 | 缺口 | 根因 | 修复 |
 |---|---|---|
 | 流式请求中销毁 client 崩溃 / 每次 `send` 泄漏一个 `std.http.Client` | **连接从未归还连接池** —— std 的 `Request.deinit()` 文档原文是 "Returns the request's `Connection` back to the pool"，而 `sendImpl` 从没调用它（`Response` 没有 deinit） | `defer r.deinit()` + client 提到 `HttpTransport` 持有。实测：exit 0 · 0 条泄漏报告 · stderr 0 行 |
+| 压缩第三层形同虚设 | 两处断链：`compactNow` 给 `compactTurns` 传 `null`（摘要器从未被调用）；且 `Result.summary_text` **被完全丢弃**（即便接上也不会进入下一轮请求） | `SummaryHost` 发起独立 LLM 调用（本地 collector，不污染主 sink）+ `Message.compactContinuation` 插在保留段之前 |
 | 引擎层退避 jitter 从未生效（cap 30s ≠ 设计的 32s） | `recovery.zig` 自己复制了一份参数：cap 用成传输层的 30s，`DEFAULT_JITTER = 0.0` 还被 `_ = DEFAULT_JITTER;` 丢弃 | 改为委托共享的 `llm.RetryPolicy.recovery`；抽出 `delayWithJitter` 让两层共用一份抖动逻辑。新增「采样 32 次不应全相同」的断言 |
 | `--output-format stream-json` 输出错位拼接的碎片 | `File.writer()` 是**定位写**，每次新建句柄都从偏移 0 开始 → 连续 `writeStdout` **互相覆盖**。最小复现：连写 5 行 × 200 字节 → 实际只剩 200 字节 / 1 行 | 改用 `writerStreaming`。修复后一次真实链路产出 **8 行全部合法 JSON** |
 

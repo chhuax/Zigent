@@ -41,24 +41,37 @@ pub fn buildClient(
     user_config: *const config.UserConfig,
     model_override: ?[]const u8,
 ) !llm.Client {
+    // 挑一个 provider：有密钥的，**或者指向本机、本来就不需要密钥的**
+    // （Ollama / vLLM / llama.cpp 的 OpenAI 兼容端点都是这一类）
     const entry = blk: {
         for (user_config.providers) |p| {
-            if (p.api_key.len > 0 or p.api_key_env.len > 0) break :blk p;
+            if (p.api_key.len > 0 or p.api_key_env.len > 0 or isLocalEndpoint(p.base_url)) break :blk p;
         }
         break :blk null;
     } orelse {
-        logErr(rt).warn("no provider credentials found; running with a mock client", .{});
+        logErr(rt).warn(
+            "没有可用的 provider —— 会在 mock 下运行（不会真的调用模型）。\n" ++
+                "    配一个即可：{s}/.zigent/config.json 里填 providers[]（本地端点可省 apiKey）。",
+            .{rt.home},
+        );
         return llm.initMock(gpa, &.{});
     };
 
     // 内联密钥可能是 `enc:1:` 密文 —— 必须在**内存里**解密后再用，且不写回磁盘
     const hostname = try util.io.gethostname(io, gpa);
     defer gpa.free(hostname);
-    const key = (config.auth.resolveKeyDecrypted(gpa, rt.env, entry, rt.home, hostname) catch null) orelse {
-        logErr(rt).warn("provider '{s}' has no resolvable API key; using mock client", .{entry.id});
+    const maybe_key = config.auth.resolveKeyDecrypted(gpa, rt.env, entry, rt.home, hostname) catch null;
+    defer if (maybe_key) |k| gpa.free(k);
+
+    const local = isLocalEndpoint(entry.base_url);
+    const key: []const u8 = maybe_key orelse if (local) "" else {
+        logErr(rt).warn(
+            "provider '{s}' 没有可解析的密钥 —— 会在 mock 下运行。\n" ++
+                "    API 密钥用 apiKeyEnv 走环境变量（优先于内联 apiKey），不必落盘。",
+            .{entry.id},
+        );
         return llm.initMock(gpa, &.{});
     };
-    defer gpa.free(key);
     const model = model_override orelse
         (if (user_config.default_model.len > 0) user_config.default_model else entry.id);
 
@@ -202,6 +215,14 @@ pub fn print(
     const out = try std.fmt.bufPrint(&buf, "{{\"type\":\"result\",\"subtype\":\"success\",\"stop_reason\":\"{s}\"}}\n", .{stop.wireName()});
     try util.io.writeStdout(io, out);
     return 0;
+}
+
+/// 是不是"本机端点"（这类端点通常不需要密钥）。
+fn isLocalEndpoint(url: []const u8) bool {
+    return std.mem.indexOf(u8, url, "127.0.0.1") != null or
+        std.mem.indexOf(u8, url, "localhost") != null or
+        std.mem.indexOf(u8, url, "0.0.0.0") != null or
+        std.mem.indexOf(u8, url, "[::1]") != null;
 }
 
 /// 把一份录制的 SSE 脚本变成 mock 客户端（**零网络**）。

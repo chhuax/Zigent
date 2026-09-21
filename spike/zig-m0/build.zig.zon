@@ -1,0 +1,13 @@
+.{
+    .name = .zig_m0_spike,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x372ed164c6b171fd, // 由 zig build 自动校验（换包名/版本时需更新）
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "移植雷区.md",
+        "README.md",
+    },
+}

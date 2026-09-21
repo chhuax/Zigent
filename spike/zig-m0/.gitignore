@@ -1,0 +1,4 @@
+# Zig 的构建产物（与其它 spike 无关）
+.zig-cache/
+zig-cache/
+zig-out/

@@ -23,6 +23,7 @@ const util = @import("util");
 pub const rt = @import("rt.zig");
 pub const turn = @import("turn.zig");
 pub const prompt = @import("prompt.zig");
+pub const tool_exec = @import("tool_exec.zig");
 pub const host = @import("host.zig");
 pub const sink = @import("sink.zig");
 

@@ -251,7 +251,33 @@
 
 # 提交纪律 / Commit discipline
 
-1. **一条目 = 一个提交**，message 首行带编号：`[WP-13.3] recovery: 退避接上 25% jitter`
+## 分支模型 / Branch model
+
+- **`dev`** —— 所有开发在这里进行，一条目一提交
+- **`main`** —— 稳定分支，**只接受来自 `dev` 的合并**；已设保护规则：禁止直接 push、禁止 force push、禁止删除
+- 流程：在 `dev` 上提交 → REVIEW → 合并进 `main`
+
+## 提交信息 / Commit messages
+
+遵循[约定式提交 / Conventional Commits](https://www.conventionalcommits.org/zh-hans/)：`<类型>[可选 范围]: <描述>`。
+
+- 类型**小写**；常用：`feat` / `fix` / `refactor` / `perf` / `test` / `docs` / `build` / `ci` / `chore` / `revert` / `style`
+- 冒号后**有一个空格**
+- 破坏性变更用 `!`（如 `feat!:`），或在脚注写 `BREAKING CHANGE:`
+- **正文里写明对应的工作包编号**，便于对照本文件
+
+示例：
+
+```
+fix(recovery): 退避接上 25% jitter
+
+WP-13.3。引擎层退避此前 jitter 恒为 0（DEFAULT_JITTER 定义了但未使用），
+且 cap 为 30s；设计要求的是引擎层 cap 32s + 25% jitter。
+```
+
+## 操作要求 / Rules
+
+1. **一条目 = 一个提交**
 2. 只用**显式路径** `git add <文件>`，**禁用 `git add -A`**（避免卷入并行会话的未完成改动）
 3. 每个提交后附 `git show --stat` 与验收命令输出，待 review 后再进下一条
 4. 每个 WP 结束时停下来等确认

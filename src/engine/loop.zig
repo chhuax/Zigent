@@ -82,6 +82,63 @@ pub const SessionOptions = struct {
     interaction_broker: ?host_mod.InteractionBroker = null,
 };
 
+/// 第三层压缩的摘要器宿主。
+///
+/// 它自己发起**一次独立的 LLM 调用**（不带工具、非主循环），因此：
+///   - 摘要过程的 `text_delta` **不能**混进用户事件流 → 用本地 collector，不用 `session.sink`；
+///   - 调用失败就让 `compact.zig` 降级到第二层（它已经这么做了，**不假装成功**）。
+const SummaryHost = struct {
+    session: *Session,
+    /// 本次 summarize 用的 allocator（= compactTurns 传进来的会话 arena）。
+    gpa: Allocator = undefined,
+    out: std.ArrayListUnmanaged(u8) = .empty,
+
+    const SYSTEM_PROMPT =
+        "你是一个对话摘要器。把下面这段编码 Agent 与用户的早期对话压缩成要点，" ++
+        "保留：任务目标、已做的关键决策、已修改的文件路径、未完成的事项与结论。" ++
+        "不要臆造内容，不要复述工具输出细节。只输出摘要正文。";
+
+    /// 摘要的最大输入 / 输出上限（文档 08 §4.4：层 3 是一次 provider 调用，
+    /// 必须自己也有预算，否则压缩本身可能超窗）。
+    const MAX_TOKENS: i64 = 2_048;
+
+    fn sink(self: *SummaryHost) llm.StreamSink {
+        return .{ .ctx = self, .emit = emit };
+    }
+
+    fn emit(ctx: *anyopaque, ev: common.StreamEvent) anyerror!void {
+        const self: *SummaryHost = @ptrCast(@alignCast(ctx));
+        switch (ev) {
+            .text_delta => |d| try self.out.appendSlice(self.gpa, d.text),
+            else => {},
+        }
+    }
+
+    fn summarize(
+        ctx: *anyopaque,
+        gpa: Allocator,
+        io: std.Io,
+        text: []const u8,
+    ) anyerror![]u8 {
+        const self: *SummaryHost = @ptrCast(@alignCast(ctx));
+        self.gpa = gpa;
+        self.out = .empty;
+
+        const msgs = try gpa.alloc(common.Message, 1);
+        msgs[0] = try common.Message.user(gpa, text);
+        const req = llm.ApiRequest{
+            .model = self.session.model,
+            .system = SYSTEM_PROMPT,
+            .messages = msgs,
+            .tools = &.{}, // ★ 摘要不需要工具 —— 带上会让 provider 白算一遍 schema
+            .max_tokens = MAX_TOKENS,
+        };
+        _ = try self.session.client.streamChat(io, &req, self.sink(), self.session.rt.cancel);
+        if (self.out.items.len == 0) return error.EmptySummary;
+        return gpa.dupe(u8, self.out.items);
+    }
+};
+
 pub const Session = struct {
     gpa: Allocator,
     /// 会话级 arena：轮次 / 消息 / 组合缓冲都放这里 —— 压缩时整体重建的语义
@@ -101,6 +158,10 @@ pub const Session = struct {
     mode: common.perm.Mode = .ask,
     system_prompt: []u8 = &.{},
     model: []const u8 = "",
+
+    /// 第三层压缩产出的续接文本（已含 `<compact-continuation>` 包裹）。
+    /// 下一轮请求时作为 `Message.compactContinuation` **插在保留段之前**（文档 08 §4.4）。
+    compact_continuation: ?[]const u8 = null,
     total_usage: common.Usage = .{},
     tool_call_total: i32 = 0,
     started_ms: i64 = 0,
@@ -483,7 +544,16 @@ pub const Session = struct {
     }
 
     fn buildMessages(self: *Session) ![]Message {
-        return self.turnsMessages();
+        const a = self.arena.allocator();
+        const base = try self.turnsMessages();
+        const cont = self.compact_continuation orelse return base;
+        // ★ 续接消息**插在保留段之前**，不是追加到末尾 —— 它代表"更早的对话"。
+        //   若追加到末尾，它就会变成「最后一条 user 消息」，被 preload 当成用户请求
+        //   （文档 08 §4.4 专门强调过这一点）。
+        const out = try a.alloc(Message, base.len + 1);
+        out[0] = try common.Message.compactContinuation(a, cont);
+        @memcpy(out[1..], base);
+        return out;
     }
 
     fn turnsMessages(self: *Session) ![]Message {
@@ -552,13 +622,22 @@ pub const Session = struct {
     fn compactNow(self: *Session) !bool {
         const before_tokens = self.rawEstimate();
         const before_turns = self.turns.items.len;
+
+        // ★ 第三层接线：给 compactTurns 一个真的摘要器（此前传 `null`，
+        //   于是压缩**永远停在第二层**，层 3 形同虚设）。
+        var summary_host = SummaryHost{ .session = self };
         const r = compact_mod.compactTurns(
             self.arena.allocator(),
             self.rt.io,
             self.turns.items,
             .{ .keep_recent_turns = 4 },
-            null,
+            .{ .ctx = &summary_host, .summarize = SummaryHost.summarize },
         ) catch return false;
+
+        // 第三层真的跑成功时，把续接文本存起来供下一轮请求注入。
+        // （`compact.zig` 在摘要失败时会降级成第二层且 summary_text = null —— 这里如实跟随，
+        //   不会出现"声称用了摘要、实际没有"的状态。）
+        if (r.summary_text) |s| self.compact_continuation = s;
 
         // ★ 成功判据：**最终 provider 上下文确实缩小**
         const after_tokens = self.rawEstimate();
@@ -681,4 +760,129 @@ test "loop: 会话能装配并 deinit（不触网）" {
 
     // 没有 mock 脚本 → 流立即结束，不应 panic
     _ = session.submitMessage("你好") catch {};
+}
+
+test "loop: 压缩续接消息插在保留段之前，且带 compact_continuation 标记" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.heap.ArenaAllocator.init(testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+    const home = try std.fmt.allocPrint(a, "/tmp/zigent-loop-cont-{s}", .{
+        try util.io.randomHex(io, a, 6),
+    });
+    defer util.io.removeTree(io, home) catch {};
+
+    const env = std.process.Environ.Map.init(testing.allocator);
+    var paths = config.Paths{ .home = home, .cwd = "/repo" };
+    var settings = config.Settings{ .permission_mode = .ask, .model = "mock-model" };
+    var cancel = std.atomic.Value(bool).init(false);
+    const rt = rt_mod.Rt{
+        .gpa = a,
+        .io = io,
+        .env = &env,
+        .cwd = "/repo",
+        .home = home,
+        .settings = &settings,
+        .paths = &paths,
+        .session_id = "sess-cont",
+        .cancel = &cancel,
+        .logger = .{ .io = io, .min_level = .err },
+    };
+
+    var collecting = sink_mod.CollectingSink.init(a);
+    const client = try llm.initMock(a, &.{});
+    var session = try Session.init(a, rt, collecting.sink(), client, .{});
+    defer session.deinit();
+
+    // ① 没压缩过 → 消息里不应出现续接
+    {
+        const msgs = try session.buildMessages();
+        for (msgs) |m| try testing.expect(m.meta != .compact_continuation);
+    }
+
+    // 塞一轮真实对话，才能验证续接是"插在前面"而不是"被追加到末尾"
+    const blocks = try a.alloc(common.ContentBlock, 1);
+    blocks[0] = .{ .text = .{ .text = "你好" } };
+    const asst = common.Message{ .role = .assistant, .content = blocks };
+    try session.turns.append(session.gpa, try turn_mod.Turn.init(a, asst, &.{}));
+
+    // ② 模拟第三层产出
+    const cont = "<compact-continuation>\n早期对话摘要\n</compact-continuation>";
+    session.compact_continuation = cont;
+
+    const msgs = try session.buildMessages();
+    try testing.expect(msgs.len >= 2);
+
+    // 必须是**第一条**：追加到末尾会让它变成"最后一条 user 消息"，
+    // preload 会把它当成用户请求（文档 08 §4.4）
+    try testing.expectEqual(common.MessageRole.user, msgs[0].role);
+    switch (msgs[0].meta) {
+        .compact_continuation => |t| try testing.expectEqualStrings(cont, t),
+        else => return error.ExpectedContinuationFirst,
+    }
+    // 且不能是最后一条
+    try testing.expect(msgs[msgs.len - 1].meta != .compact_continuation);
+}
+
+/// 最小 Anthropic 文本响应（供摘要器单测用；没有 tool_call）。
+const SUMMARY_SSE =
+    "event: message_start\n" ++
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
+    "event: content_block_start\n" ++
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" ++
+    "event: content_block_delta\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"摘要内容\"}}\n\n" ++
+    "event: content_block_stop\n" ++
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
+    "event: message_delta\n" ++
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n" ++
+    "event: message_stop\n" ++
+    "data: {\"type\":\"message_stop\"}\n\n";
+
+test "loop: 第三层摘要器真的发起调用、收集 text_delta 并返回摘要" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.heap.ArenaAllocator.init(testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+    const home = try std.fmt.allocPrint(a, "/tmp/zigent-loop-sum-{s}", .{
+        try util.io.randomHex(io, a, 6),
+    });
+    defer util.io.removeTree(io, home) catch {};
+
+    const env = std.process.Environ.Map.init(testing.allocator);
+    var paths = config.Paths{ .home = home, .cwd = "/repo" };
+    var settings = config.Settings{ .permission_mode = .ask, .model = "mock-model" };
+    var cancel = std.atomic.Value(bool).init(false);
+    const rt = rt_mod.Rt{
+        .gpa = a,
+        .io = io,
+        .env = &env,
+        .cwd = "/repo",
+        .home = home,
+        .settings = &settings,
+        .paths = &paths,
+        .session_id = "sess-sum",
+        .cancel = &cancel,
+        .logger = .{ .io = io, .min_level = .err },
+    };
+
+    var collecting = sink_mod.CollectingSink.init(a);
+    const script = [_]llm.MockTurn{.{ .sse_bytes = SUMMARY_SSE }};
+    const client = try llm.initMock(a, &script);
+    var session = try Session.init(a, rt, collecting.sink(), client, .{});
+    defer session.deinit();
+
+    var host = SummaryHost{ .session = &session };
+    const summary = try SummaryHost.summarize(&host, a, io, "【早期对话】用户：帮我改个 bug。");
+
+    try testing.expectEqualStrings("摘要内容", summary);
+
+    // ★ 摘要过程**不能**污染用户事件流（它走本地 collector，不走 session.sink）
+    try testing.expectEqual(@as(usize, 0), collecting.events.items.len);
 }

@@ -131,6 +131,24 @@ pub const Message = struct {
         };
     }
 
+    /// role = USER + `compact_continuation` 标记 —— 压缩第三层的续接消息。
+    ///
+    /// 单独一个工厂（而不是复用 `engineInjected`）是因为 **meta 变体不同**：
+    /// `engineInjected` 走 `.engine_injected`，本条走 `.compact_continuation`。
+    ///
+    /// 文档 08 §4.4 特意强调必须标记：这条消息是引擎替用户「起头」的，
+    /// 不标记的话每次 auto-compact 之后它就成了「最后一条 user 消息」，
+    /// preload 会把它当成用户请求。
+    ///
+    /// 调用方负责把它**插在保留段之前**（不是追加到末尾）。
+    pub fn compactContinuation(gpa: Allocator, text: []const u8) Allocator.Error!Message {
+        return .{
+            .role = .user,
+            .content = try oneBlock(gpa, text),
+            .meta = .{ .compact_continuation = text },
+        };
+    }
+
     fn oneBlock(gpa: Allocator, text: []const u8) Allocator.Error![]const ContentBlock {
         const blocks = try gpa.alloc(ContentBlock, 1);
         blocks[0] = content.text(text);

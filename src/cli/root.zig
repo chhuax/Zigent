@@ -94,6 +94,13 @@ pub fn run(init: std.process.Init) !u8 {
 
     // CLI 覆盖优先于分层配置
     if (opts.model) |m| settings.model = m;
+
+    // ⚠️ `applyKeysLayer` 只写**档位名**（"default"），而"按档位解析具体模型"的路由
+    //    尚未实现 —— 不覆盖它就会把字符串 "default" 当模型名发给 provider。
+    //    （真实报错：`The supported API model names are …, but you passed .`）
+    if (opts.model == null and user_config.default_model.len > 0) {
+        settings.model = user_config.default_model;
+    }
     if (opts.permission_mode) |pm| {
         if (common.perm.Mode.fromWire(pm)) |mode| settings.permission_mode = mode;
     }

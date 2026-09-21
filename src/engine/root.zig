@@ -31,6 +31,7 @@ pub const tool_exec = @import("tool_exec.zig");
 pub const host = @import("host.zig");
 pub const sink = @import("sink.zig");
 pub const loop = @import("loop.zig");
+pub const request_shape_test = @import("request_shape_test.zig");
 
 /// ★ 配对不变量的类型化载体（文档 04 §13 命名裁决：`engine.Turn`）
 pub const Turn = turn.Turn;

@@ -23,7 +23,7 @@
 | WP-11 | `engine/tool_exec` | `src/engine/tool_exec.zig` | 5 | 🟡 3/5 |
 | WP-12 | `budget` + `compact` | `src/engine/{budget,compact}.zig` | 7 | 🟡 5/7 |
 | WP-13 | `recovery` | `src/engine/recovery.zig` | 5 | 🟡 4/5 |
-| WP-14 | `transcript` | `src/engine/transcript.zig` | 6 | 🟡 4/6 |
+| WP-14 | `transcript` | `src/engine/transcript.zig` | 6 | 🟡 5/6 |
 | WP-15 | `cli/` 入口 | `src/cli/` 5 文件 1,146 行 | 4 | 🟡 3/4 |
 | WP-16 | `server/` HTTP + SSE | `src/server/` 7 文件 1,571 行 | 7 | ✅ 7/7 |
 | WP-17 | `client_proto/` | `src/client_proto/` 3 文件 526 行 | 4 | 🟡 3/4 |
@@ -162,7 +162,7 @@
 - [x] 2. `parentUuid` 链重建（不靠行序）+ 去环 + `repairMessages` 剔除孤儿 `tool_result`
 - [x] 3. `type` 分流正确（`message`/`compact_boundary`/`replay` 参与链；其余跳过）
 - [x] 4. 旧文件 round-trip（含幂等性预检）
-- [ ] 5. 🟡 **resume / resumeAt / fork / delta 四个操作** → resume ✅（`open` + `latestLeafUuid`）、resumeAt ✅（`messagesAt`）；**`fork` / `delta` 未实现**
+- [x] 5. 🟡 **resume / resumeAt / fork / delta 四个操作** → resume ✅（`open` + `latestLeafUuid`）、resumeAt ✅（`messagesAt`）、**fork ✅（`forkTo`，保留 uuid/parentUuid、只改 sessionId）**；**`delta` 待确认**（设计无定义，且 `02-功能清单` 标 X、`17-主设计方案` 标 P1，两份文档矛盾）
 - [x] 6. 持久化失败不炸主循环（所有 store 写异常都 warn 吞掉）
 
 # 阶段 3 · 服务与协议
@@ -242,7 +242,7 @@
 | 3 | WP-12.6 | 压缩**第三层 LLM 摘要未接线** | `src/engine/loop.zig:547` 传 `null` | 🟠 |
 | 4 | WP-11.1 / 11.4 | 工具**真并发**与**抢跑**均未实现 | `src/engine/tool_exec.zig:126` | 🟠 |
 | 5 | WP-15.1 / 15.4 | `doctor`、6 个 `--internal-*` 未实现（15.2 已实测通过，见下） | `src/cli/args.zig` | 🟡 |
-| 6 | WP-14.5 | transcript **`fork` / `delta` 未实现** | `src/engine/transcript.zig` | 🟡 |
+| 6 | WP-14.5 | transcript 的 **`delta` 待确认**：设计里无定义，且 02/17 两份文档结论矛盾（X vs P1）。`fork` 已实现（`forkTo`） | `src/engine/transcript.zig` | 🟡 |
 | 7 | WP-01.2 | 从未在 **0.17.0-dev** 上跑过测试（验收明确要求两版都过） | — | 🟡 |
 
 **反向发现（代码比设计更严，非缺口）**：危险命令 golden 实际 **67** 条（设计 64）；越界用例实际 **88** 条（设计 23）。

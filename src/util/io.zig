@@ -320,15 +320,21 @@ pub fn readStdinAlloc(io: Io, gpa: Allocator) ![]u8 {
 }
 
 /// 写 stdout（**协议通道**，日志绝不能混进来）。
+///
+/// ⚠️ 必须用 `writerStreaming`，**不能**用 `writer`。
+/// 0.16 的 `File.writer` 是**定位写**（见本文件 `appendFile` 的注释）：每次新建的
+/// 句柄都从偏移 0 开始写，于是连续调用会**互相覆盖** —— 表现为 stdout 里只剩最后
+/// 一条、或 NDJSON 出现「前一条的尾巴 + 后一条」的错位拼接。
+/// stdout 是流（管道/终端），定位写既无意义也不正确。
 pub fn writeStdout(io: Io, bytes: []const u8) !void {
-    var writer = std.Io.File.stdout().writer(io, &.{});
+    var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll(bytes);
     try writer.interface.flush();
 }
 
-/// 写 stderr（**日志通道**）。
+/// 写 stderr（**日志通道**）。同样必须用流式写，理由见 `writeStdout`。
 pub fn writeStderr(io: Io, bytes: []const u8) void {
-    var writer = std.Io.File.stderr().writer(io, &.{});
+    var writer = std.Io.File.stderr().writerStreaming(io, &.{});
     writer.interface.writeAll(bytes) catch return;
     writer.interface.flush() catch return;
 }

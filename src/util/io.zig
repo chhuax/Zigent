@@ -515,7 +515,13 @@ test "io: loopback 监听 + 端口 0 回报真实端口" {
 
     var l = try listenLoopback(io, 0);
     defer l.deinit(io);
-    try testing.expect(l.port >= 49152);
+    // 📌 **不要在这里断言端口落在 49152–65535**（原来就是 `l.port >= 49152`）。
+    // 那个区间是旧的"随机试绑"实现自己选的，现在端口由内核分配，而
+    // **各系统的临时端口区间不同**：macOS 是 49152–65535，Linux 默认是
+    // 32768–60999（net.ipv4.ip_local_port_range）。这条断言在 macOS 上恒真、
+    // 在 Linux 上经常失败 —— 是被 CI 抓出来的真实跨平台差异。
+    // 契约只要求"不是 0 且可连接"，范围不属于契约。
+    try testing.expect(l.port != 0);
 
     var l2 = try listenLoopback(io, 0);
     defer l2.deinit(io);

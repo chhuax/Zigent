@@ -41,7 +41,12 @@ pub fn build(b: *std.Build) void {
         \\if [ -n "$bad" ]; then
         \\  echo "GUARD FAIL: std.posix 只允许出现在 src/util/io.zig"; echo "$bad"; exit 1
         \\fi
+        \\# src/common/ 尚未创建（WP-00 才引入），此时跳过而不是让 grep 往 stderr 报错。
+        \\if [ -d src/common ]; then
         \\bad2=$(grep -rln "std\\.Io" src/common --include=*.zig | grep -v "^src/common/tool.zig$" || true)
+        \\else
+        \\bad2=""
+        \\fi
         \\if [ -n "$bad2" ]; then
         \\  echo "GUARD FAIL: common/ 必须保持纯逻辑（tool.zig 的宿主总线除外）"; echo "$bad2"; exit 1
         \\fi

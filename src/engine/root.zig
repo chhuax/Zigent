@@ -26,6 +26,7 @@ pub const budget = @import("budget.zig");
 pub const recovery = @import("recovery.zig");
 pub const compact = @import("compact.zig");
 pub const prompt = @import("prompt.zig");
+pub const transcript = @import("transcript.zig");
 pub const tool_exec = @import("tool_exec.zig");
 pub const host = @import("host.zig");
 pub const sink = @import("sink.zig");

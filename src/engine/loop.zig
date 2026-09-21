@@ -337,7 +337,7 @@ pub const Session = struct {
                         code.wireName(),
                         @intCast(self.recovery.api_attempts),
                         @intCast(self.recovery.max_api_retries),
-                        self.recovery.backoffMs(null, null),
+                        self.recovery.backoffMs(io, null, null),
                     ) });
                     switch (action) {
                         .retry => continue :stream_attempt,

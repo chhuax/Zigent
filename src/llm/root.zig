@@ -46,6 +46,11 @@ pub const openai = @import("openai.zig");
 pub const http = @import("http.zig");
 pub const client = @import("client.zig");
 
+/// 重试/退避策略（传输层与**引擎层**共用同一个类型，由调用点选实例）。
+/// 引擎层需要 `RetryPolicy.recovery`（cap 32s + 25% jitter），
+/// 因此在这里导出，避免 engine 伸手进 `llm.client` 内部。
+pub const RetryPolicy = client.RetryPolicy;
+
 // ── 契约类型（INTERFACES §4.2，**逐字**）──────────────────────────────────────
 
 pub const ToolSpec = struct {

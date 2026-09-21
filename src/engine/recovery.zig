@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const common = @import("common");
+const llm = @import("llm");
 const budget = @import("budget.zig");
 
 pub const Action = enum {
@@ -50,10 +51,17 @@ pub const State = enum { idle, start_turn, recovering, done };
 /// 生产口径（文档 03 §7.6：「重试策略应该可配置」是误解 —— 定义了但从不使用的
 /// `ROBUST`/`PERSISTENT` 是死配置，别做）。
 pub const DEFAULT_MAX_API_RETRIES: u32 = 3;
-pub const DEFAULT_BACKOFF_INITIAL_MS: i64 = 1_000;
-pub const DEFAULT_BACKOFF_FACTOR: f64 = 2.0;
-pub const DEFAULT_BACKOFF_CAP_MS: i64 = 30_000;
-pub const DEFAULT_JITTER: f64 = 0.0;
+
+/// 引擎层退避参数 —— **直接复用共享的 `llm.RetryPolicy.recovery`**，
+/// 不再在本文件里复制一份。文档 09 §5.1：传输层是
+/// `(3, 1s, ×2.0, cap 30s, jitter 0)`，**引擎层是 `cap 32s + 25% jitter`**，
+/// 两者共用一个 `RetryPolicy` 类型、由调用点选实例。
+///
+/// 历史教训：本文件曾自己写死一份参数，结果是 cap 30s + jitter 0，
+/// 与引擎层设计不符，而且 `DEFAULT_JITTER` 定义了却从未被使用
+/// （`_ = DEFAULT_JITTER;`）—— 也就是说**退避从来没有抖动过**。
+pub const engine_backoff = llm.RetryPolicy.recovery;
+
 pub const DEFAULT_MAX_TURNS: u32 = 200;
 pub const SUBAGENT_MAX_TURNS: u32 = 10;
 pub const DEFAULT_MAX_COMPACTIONS: u32 = 3;
@@ -140,10 +148,17 @@ pub const Recovery = struct {
     }
 
     /// 退避：`Retry-After` 响应头 > 异常携带 > 本地策略。
-    pub fn backoffMs(self: *Recovery, retry_after_ms: ?i64, error_hint_ms: ?i64) i64 {
+    /// 退避：`Retry-After` 响应头 > 异常携带 > 本地策略（本地策略带 25% 抖动，
+    /// 因此**同一次数两次调用结果可能不同** —— 这正是抖动的目的）。
+    pub fn backoffMs(
+        self: *Recovery,
+        io: std.Io,
+        retry_after_ms: ?i64,
+        error_hint_ms: ?i64,
+    ) i64 {
         if (retry_after_ms) |v| return @max(0, v);
         if (error_hint_ms) |v| return @max(0, v);
-        return localBackoff(self.api_attempts);
+        return localBackoff(io, self.api_attempts);
     }
 
     /// 输出上限升级（配合 `clamp_max_tokens_and_retry`）。
@@ -160,18 +175,12 @@ pub const Recovery = struct {
 };
 
 /// 本地退避：3 次 / 1s 起步 / ×2 / cap 30s / jitter 0。
-pub fn localBackoff(attempt: u32) i64 {
-    var ms: f64 = @floatFromInt(DEFAULT_BACKOFF_INITIAL_MS);
-    var i: u32 = 0;
-    while (i < attempt) : (i += 1) {
-        ms *= DEFAULT_BACKOFF_FACTOR;
-        if (ms >= @as(f64, @floatFromInt(DEFAULT_BACKOFF_CAP_MS))) {
-            ms = @floatFromInt(DEFAULT_BACKOFF_CAP_MS);
-            break;
-        }
-    }
-    _ = DEFAULT_JITTER;
-    return @intFromFloat(ms);
+/// 引擎层本地退避：**委托给共享的 `llm.RetryPolicy.recovery`** ——
+/// `base = 1000 × 2^attempt`，`cap = 32_000ms`，抖动 `±25% × base`。
+///
+/// 需要 `io` 是因为抖动要取随机字节（`util.io.randomBytes`）。
+pub fn localBackoff(io: std.Io, attempt: u32) i64 {
+    return @intCast(engine_backoff.delayWithJitter(attempt, io));
 }
 
 // ── 测试 ─────────────────────────────────────────────────────────────────────
@@ -245,19 +254,54 @@ test "recovery: fallback 只切一次（唯一 owner）" {
 }
 
 test "recovery: 退避优先级 Retry-After > 异常提示 > 本地" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
     var r = Recovery.init(200);
-    try testing.expectEqual(@as(i64, 5000), r.backoffMs(5000, 9999));
-    try testing.expectEqual(@as(i64, 9999), r.backoffMs(null, 9999));
-    try testing.expectEqual(@as(i64, 1000), r.backoffMs(null, null));
+
+    // 前两档是确定值
+    try testing.expectEqual(@as(i64, 5000), r.backoffMs(io, 5000, 9999));
+    try testing.expectEqual(@as(i64, 9999), r.backoffMs(io, null, 9999));
+
+    // 本地档带 ±25% 抖动 → 只能断言区间
+    var d = r.backoffMs(io, null, null);
+    try testing.expect(d >= 750 and d <= 1250); // attempt 0：base 1000
     r.noteAttempt(.retry);
-    try testing.expectEqual(@as(i64, 2000), r.backoffMs(null, null));
+    d = r.backoffMs(io, null, null);
+    try testing.expect(d >= 1500 and d <= 2500); // attempt 1：base 2000
     r.noteAttempt(.retry);
-    try testing.expectEqual(@as(i64, 4000), r.backoffMs(null, null));
+    d = r.backoffMs(io, null, null);
+    try testing.expect(d >= 3000 and d <= 5000); // attempt 2：base 4000
 }
 
-test "recovery: 本地退避有 cap" {
-    try testing.expectEqual(@as(i64, 30_000), localBackoff(20));
-    try testing.expectEqual(@as(i64, 1_000), localBackoff(0));
+test "recovery: 引擎层退避是 cap 32s + 25% jitter，且不再自己复制参数" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 两层参数必须不同（文档 09 §5.1）：传输层 30s/0，引擎层 32s/0.25
+    try testing.expectEqual(@as(u64, 32_000), engine_backoff.max_delay_ms);
+    try testing.expectEqual(@as(f64, 0.25), engine_backoff.jitter_ratio);
+    try testing.expectEqual(@as(u64, 30_000), llm.RetryPolicy.transport.max_delay_ms);
+    try testing.expectEqual(@as(f64, 0.0), llm.RetryPolicy.transport.jitter_ratio);
+
+    // attempt 0：base 1000，抖动 ±25%
+    const d0 = localBackoff(io, 0);
+    try testing.expect(d0 >= 750 and d0 <= 1250);
+
+    // 次数很大 → 被 cap 夹住：32_000 抖动 ±25% 后再受 cap → 24_000 ~ 32_000
+    const dcap = localBackoff(io, 20);
+    try testing.expect(dcap >= 24_000 and dcap <= 32_000);
+
+    // ★ 抖动必须**真的**生效：同一 attempt 多次采样不应全部相同
+    //   （修复前 jitter 恒为 0，这一条会失败）
+    const first = localBackoff(io, 3);
+    var same = true;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) {
+        if (localBackoff(io, 3) != first) same = false;
+    }
+    try testing.expect(!same);
 }
 
 test "recovery: 子代理 maxTurns 更小" {

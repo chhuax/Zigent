@@ -1,0 +1,81 @@
+# Zigent CI
+#
+# 作业只有一个 test，在 Linux / macOS 上跑。**双平台不是例行卫生**，
+# 这个仓库的 OS 边界代码行为本身就按平台分叉，必须两边都跑：
+#   - `fsio.resolveWithinReal`：macOS 的 /tmp 是指向 /private/tmp 的符号链接，
+#     Linux 上是真目录 —— 同一个测试在两边覆盖到的路径不同；
+#     另外 OpenFileOptions.resolve_beneath 依赖 posix.O 的 RESOLVE_BENEATH 字段，
+#     Linux/FreeBSD 有、macOS 没有（静默忽略）。
+#   - `io.appendFile` 的 advisory lock：Darwin/BSD 与 open 原子获取，
+#     Linux 是 open 之后补一次系统调用。
+#   - `fsio.collectFiles`：Io.Dir.walk 的返回顺序依赖文件系统（APFS vs ext4），
+#     截断导致的假事件在两边触发概率不同。
+#
+# 为什么不设 Windows 作业：
+#   1. `src/util/io.zig`（唯一的 OS 边界）用了 `std.posix.HOST_NAME_MAX`，
+#      在 Windows 上不存在；
+#   2. 测试里还硬编码着 /tmp、/bin/bash、/bin/sh、/etc 十余处。
+#   按 AGENTS.md 决策 #6「Windows / WSL 延后」，这里**不**放一个必然失败的作业
+#   —— 长期挂红只会让人忽略 CI 信号。等 Windows 分支实现后再加回来：
+#
+#     windows:
+#       runs-on: windows-latest
+#       steps:
+#         - uses: actions/checkout@v4
+#         - uses: mlugg/setup-zig@v2
+#           with: { version: "0.16.0" }
+#         - run: zig build test --summary all
+#
+# 为什么暂时没有 cross 作业：
+#   build.zig 目前只产出测试产物，没有可安装的可执行文件，
+#   `zig build -Dtarget=...` 跑了等于空转。等有真实 artifact 再加 ——
+#   那时它才是在验证「单机交叉编译出全平台产物」这个卖点。
+#
+# ⚠️ 首次运行要盯一件事：Zig 0.16.0 **在 GitHub 上没有 tag**（仓库最高只到
+#   0.15.2），它只发布在 ziglang.org。mlugg/setup-zig 是从 ziglang.org 的
+#   index.json 解析版本的，应该没问题；但如果某个代码路径回落到 GitHub
+#   releases，这一步就会失败。真跑一次才能确认，推断不出来。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一 ref 的旧运行自动取消
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  test:
+    name: test · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了也要看另一个的结果 —— 平台差异正是我们要观察的东西
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: 版本
+        run: zig version
+
+      # `zig build test` 已经把 guard 作为依赖挂进去了（见 build.zig 末尾），
+      # 所以架构约束检查不需要单列一步。
+      - name: 单元测试 + 架构约束检查
+        run: zig build test --summary all

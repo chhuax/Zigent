@@ -30,12 +30,15 @@ pub const transcript = @import("transcript.zig");
 pub const tool_exec = @import("tool_exec.zig");
 pub const host = @import("host.zig");
 pub const sink = @import("sink.zig");
+pub const loop = @import("loop.zig");
 
 /// ★ 配对不变量的类型化载体（文档 04 §13 命名裁决：`engine.Turn`）
 pub const Turn = turn.Turn;
 pub const PairingError = turn.PairingError;
 pub const repairMessages = turn.repairMessages;
 pub const Rt = rt.Rt;
+pub const Session = loop.Session;
+pub const SessionOptions = loop.SessionOptions;
 pub const EventSink = sink.EventSink;
 pub const CollectingSink = sink.CollectingSink;
 pub const DiscardingSink = sink.DiscardingSink;

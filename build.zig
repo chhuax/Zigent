@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     const memory = mk(b, target, optimize, "memory");
     const engine = mk(b, target, optimize, "engine");
     const server = mk(b, target, optimize, "server");
+    const proto = mk(b, target, optimize, "client_proto");
 
     // L0′ / L0 —— 零内部依赖
     //   注意：这里**故意没有** common.addImport("util", util)。
@@ -50,6 +51,7 @@ pub fn build(b: *std.Build) void {
 
     // L4 协议与入口
     link(server, &.{ .{ "common", common }, .{ "engine", engine }, .{ "config", config }, .{ "util", util }, .{ "llm", llm } });
+    link(proto, &.{ .{ "common", common }, .{ "engine", engine }, .{ "util", util } });
 
     // ── 测试：**每个模块各自成一个测试产物** ──
     //   这一步是铁律强制的关键：只有把每个模块当测试根，Zig 才会**完整分析它的文件**。
@@ -58,7 +60,7 @@ pub fn build(b: *std.Build) void {
     const mods = .{
         .{ "util", util }, .{ "common", common }, .{ "llm", llm }, .{ "config", config },
         .{ "perm", perm }, .{ "tools", tools }, .{ "memory", memory }, .{ "engine", engine },
-        .{ "server", server },
+        .{ "server", server }, .{ "client_proto", proto },
     };
     inline for (mods) |m| {
         const t = b.addTest(.{ .root_module = m[1] });

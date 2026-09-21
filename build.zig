@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
     const server = mk(b, target, optimize, "server");
     const proto = mk(b, target, optimize, "client_proto");
     const cli = mk(b, target, optimize, "cli");
+    const ext = mk(b, target, optimize, "ext");
 
     // L0′ / L0 —— 零内部依赖
     //   注意：这里**故意没有** common.addImport("util", util)。
@@ -35,25 +36,25 @@ pub fn build(b: *std.Build) void {
     //   - 权限的**契约类型**（Verdict/Outcome/Request/Response）在 `common/perm.zig`，
     //     所以 `tools` 只需要 `common`，不需要 `perm/`（实现）；这样三条流可完全并行。
     //   - `memory` 只做存储，路径由 engine 传入，因此也不依赖 `config`。
-    link(perm, &.{ .{ "common", common } });
+    link(perm, &.{.{ "common", common }});
     link(tools, &.{ .{ "common", common }, .{ "util", util } });
     link(memory, &.{ .{ "common", common }, .{ "util", util } });
 
     // L3 内核：绝不 import cli；但**必须**能碰操作系统边界（→ util）
     link(engine, &.{
-        .{ "common", common },
-        .{ "llm", llm },
-        .{ "tools", tools },
-        .{ "perm", perm },
-        .{ "memory", memory },
-        .{ "config", config },
+        .{ "common", common }, .{ "llm", llm },       .{ "tools", tools },
+        .{ "perm", perm },     .{ "memory", memory }, .{ "config", config },
         .{ "util", util },
     });
 
     // L4 协议与入口
     link(server, &.{ .{ "common", common }, .{ "engine", engine }, .{ "config", config }, .{ "util", util }, .{ "llm", llm } });
     link(proto, &.{ .{ "common", common }, .{ "engine", engine }, .{ "util", util } });
-    link(cli, &.{ .{ "common", common }, .{ "server", server }, .{ "client_proto", proto }, .{ "engine", engine }, .{ "config", config }, .{ "util", util }, .{ "llm", llm } });
+    link(cli, &.{
+        .{ "common", common }, .{ "server", server }, .{ "client_proto", proto },
+        .{ "engine", engine }, .{ "config", config }, .{ "util", util }, .{ "llm", llm },
+    });
+    link(ext, &.{ .{ "tools", tools }, .{ "common", common } });
 
     // ── 可执行 ──
     const exe = b.addExecutable(.{
@@ -72,9 +73,10 @@ pub fn build(b: *std.Build) void {
     //   否则惰性分析会让「import 了一个未声明的模块」这种越界悄悄溜过去。
     const test_step = b.step("test", "跑全部模块测试");
     const mods = .{
-        .{ "util", util }, .{ "common", common }, .{ "llm", llm }, .{ "config", config },
-        .{ "perm", perm }, .{ "tools", tools }, .{ "memory", memory }, .{ "engine", engine },
-        .{ "server", server }, .{ "client_proto", proto }, .{ "cli", cli },
+        .{ "util", util },         .{ "common", common },   .{ "llm", llm },
+        .{ "config", config },     .{ "perm", perm },       .{ "tools", tools },
+        .{ "memory", memory },     .{ "engine", engine },   .{ "server", server },
+        .{ "client_proto", proto },.{ "cli", cli },         .{ "ext", ext },
     };
     inline for (mods) |m| {
         const t = b.addTest(.{ .root_module = m[1] });
@@ -91,6 +93,7 @@ pub fn build(b: *std.Build) void {
     //   文档 11 §10 验收：
     //     #2 除 util/io.zig 外，任何文件不 import std.posix
     //     #3 common/ 下不出现 std.Io（唯一例外：tool.zig 的宿主总线）
+    //   这两条过去只能靠人盯 review；现在是 `zig build guard`。
     const guard = b.step("guard", "架构约束检查（std.posix 隔离 / common 纯逻辑）");
     guard.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -99,7 +102,7 @@ pub fn build(b: *std.Build) void {
         \\if [ -n "$bad" ]; then
         \\  echo "GUARD FAIL: std.posix 只允许出现在 src/util/io.zig"; echo "$bad"; exit 1
         \\fi
-        \\bad2=$(grep -rln "std\\.Io" src/common --include=*.zig | grep -v "^src/common/tool.zig$" || true)
+        \\bad2=$(grep -rln "std\.Io" src/common --include=*.zig | grep -v "^src/common/tool.zig$" || true)
         \\if [ -n "$bad2" ]; then
         \\  echo "GUARD FAIL: common/ 必须保持纯逻辑（tool.zig 的宿主总线除外）"; echo "$bad2"; exit 1
         \\fi

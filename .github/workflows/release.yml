@@ -1,0 +1,132 @@
+# Zigent 发布流程
+#
+# 只在推送 tag（v*）时触发 —— 平时推代码不会产生任何发布。
+#
+# 为什么需要它：本项目的核心卖点是「单机交叉编译出全平台产物」。CI 只证明能编译，
+# 这里才真正产出可下载、带校验和、版本可追溯的发布物。
+#
+# 约定：
+#   - tag 名 vX.Y.Z 必须与 build.zig.zon 的 .version 完全一致，否则构建期直接失败
+#   - 产物命名 zigent-<版本>-<目标>.tar.xz，同名 .sha256 便于校验
+#   - Windows 不在矩阵内（当前编译不过，理由见 .github/workflows/ci.yml 顶部注释）
+#
+# 想先试跑：推一个预发布 tag 即可，例如
+#   git tag v0.1.0-rc1 && git push github v0.1.0-rc1
+# 版本比对是「去掉 v 前缀后逐字相等」，所以预发布记得把 build.zig.zon 的
+# .version 一起改成 0.1.0-rc1，否则构建期就会失败（这是有意为之）。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  build:
+    name: build · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-macos
+          - aarch64-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: 校验 tag 与 build.zig.zon 版本一致
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(grep -oE '\.version = "[^"]+"' build.zig.zon | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          echo "tag=${GITHUB_REF_NAME} → ${tag}"
+          echo "build.zig.zon → ${ver}"
+          if [ "${tag}" != "${ver}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 build.zig.zon 的 .version (${ver}) 不一致"
+            exit 1
+          fi
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+
+      - name: 交叉编译 ${{ matrix.target }}
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -p dist
+
+      - name: 打包并生成校验和
+        run: |
+          set -euo pipefail
+          name="zigent-${{ steps.ver.outputs.version }}-${{ matrix.target }}"
+          mkdir -p pkg
+          cp dist/bin/zigent pkg/zigent
+          tar -cJf "${name}.tar.xz" -C pkg zigent
+          sha256sum "${name}.tar.xz" > "${name}.tar.xz.sha256"
+          echo "--- 产物 ---"
+          ls -l "${name}.tar.xz" "${name}.tar.xz.sha256"
+          cat "${name}.tar.xz.sha256"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: zigent-${{ matrix.target }}
+          path: |
+            zigent-*.tar.xz
+            zigent-*.tar.xz.sha256
+          if-no-files-found: error
+
+  release:
+    name: 创建 Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 收集全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 创建 Release（已存在则覆盖附件）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
+
+          # 0.x 或带预发布后缀（如 -rc1）→ 自动标记为 pre-release
+          prerelease=""
+          case "${ver}" in
+            0.*|*-*) prerelease="--prerelease" ;;
+          esac
+          echo "版本 ${ver} · 预发布标记: ${prerelease:-无}"
+
+          ls -l artifacts
+          gh release create "${tag}" \
+            --title "${tag}" \
+            --generate-notes \
+            ${prerelease} \
+            artifacts/* \
+          || gh release upload "${tag}" artifacts/* --clobber
+
+          # 把「能做什么 / 不能做什么」的状态说明前置到自动生成的变更列表之前
+          gh release view "${tag}" --json body --jq .body > /tmp/body.md
+          {
+            cat .github/release-preamble.md
+            cat /tmp/body.md
+          } > /tmp/notes.md
+          gh release edit "${tag}" --notes-file /tmp/notes.md
+
+          echo "--- Release 页面预览（前 25 行）---"
+          head -25 /tmp/notes.md

@@ -547,3 +547,106 @@ test "io: listenLoopback(0) 回报内核分配的真实端口" {
     var stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     stream.close(io);
 }
+
+// ── atomicWrite 原子性（WP-01 验收 #3）────────────────────────────────────────
+
+/// 并发测试用的 writer。返回 error 会被 Group 吞掉，所以把结果写进 out。
+fn atomicWriteWorker(io: Io, gpa: Allocator, path: []const u8, payload: []const u8, out: *bool) void {
+    atomicWrite(io, gpa, path, payload) catch {
+        out.* = false;
+        return;
+    };
+    out.* = true;
+}
+
+test "io: atomicWrite 并发写 —— 结果只能是某个完整版本，绝不是半截" {
+    // WP-01 验收 #3（并发部分）。atomicWrite 保的是文档 04 §9 的配对不变量：
+    // assistant(tool_use) 与紧邻的 user(tool_result) 要么都在、要么都不在。
+    // 多个 writer 同时写同一路径时，读者观察到的必须**始终是某一次写入的完整内容**，
+    // 不能是两次写入的混合、也不能是被截断的前缀。
+    //
+    // 这靠「临时文件 + rename」保证：rename 在同一文件系统内是原子的，
+    // 读者要么看到旧 inode 要么看到新 inode，不存在「正在被写」的中间态。
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const path = try tmpPath(testing.allocator, io, "concurrent.txt");
+    defer testing.allocator.free(path);
+    const dir = std.fs.path.dirname(path).?;
+    defer removeTree(io, dir) catch {};
+    try mkdirp(io, dir);
+
+    // 载荷要足够大，让写入过程真的跨越多次系统调用 —— 否则"半截"根本没机会出现。
+    const n_writers = 8;
+    const payload_len = 512 * 1024;
+    var payloads: [n_writers][]u8 = undefined;
+    for (&payloads, 0..) |*p, i| {
+        p.* = try testing.allocator.alloc(u8, payload_len);
+        // 每个 writer 用一个独占字节填满，任何混合都能被一眼认出来
+        @memset(p.*, 'A' + @as(u8, @intCast(i)));
+    }
+    defer for (payloads) |p| testing.allocator.free(p);
+
+    try atomicWrite(io, testing.allocator, path, payloads[0]);
+
+    var oks: [n_writers]bool = @splat(false);
+    // `Group` 有自己的 `init` 常量（含一个 atomic token），不能写成 `.{}`。
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    for (payloads, 0..) |p, i| {
+        // 用 concurrent 而不是 async：async 允许在同一线程上协作式调度，
+        // 那样就测不到真正的并发窗口了。
+        try group.concurrent(io, atomicWriteWorker, .{ io, testing.allocator, path, p, &oks[i] });
+    }
+    try group.await(io);
+
+    for (oks) |ok| try testing.expect(ok);
+
+    const back = try readFileAlloc(io, testing.allocator, path, payload_len * 2);
+    defer testing.allocator.free(back);
+
+    // 断言一：长度必须正好是一个完整载荷（不是截断、不是拼接）
+    try testing.expectEqual(payload_len, back.len);
+    // 断言二：全篇必须是同一个字节 —— 混合即代表两次写入交织了
+    const first = back[0];
+    try testing.expect(first >= 'A' and first < 'A' + n_writers);
+    for (back) |c| try testing.expectEqual(first, c);
+}
+
+test "io: atomicWrite 崩溃模拟 —— 残留临时文件不影响目标，也不会被误当成结果" {
+    // WP-01 验收 #3（崩溃部分）。模拟「writer 写完临时文件但在 rename 前被 kill」：
+    // 手工造一个 `<path>.tmp-<hex>` 残留，内容是半截数据。
+    // 期望：目标文件仍是旧内容（残留绝不会自己变成目标），
+    //       且后续 atomicWrite 照常成功。
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const path = try tmpPath(testing.allocator, io, "crash.txt");
+    defer testing.allocator.free(path);
+    const dir = std.fs.path.dirname(path).?;
+    defer removeTree(io, dir) catch {};
+    try mkdirp(io, dir);
+
+    try atomicWrite(io, testing.allocator, path, "OLD-COMPLETE");
+
+    // 崩溃留下的半截临时文件
+    const stale = try std.fmt.allocPrint(testing.allocator, "{s}.tmp-deadbeef", .{path});
+    defer testing.allocator.free(stale);
+    try writeFile(io, stale, "HALF-WRITT");
+
+    // 目标不受影响
+    const before = try readFileAlloc(io, testing.allocator, path, 1024);
+    defer testing.allocator.free(before);
+    try testing.expectEqualStrings("OLD-COMPLETE", before);
+
+    // 残留存在时后续写入仍然成功（临时名带随机后缀，不会撞上残留）
+    try atomicWrite(io, testing.allocator, path, "NEW-COMPLETE");
+    const after = try readFileAlloc(io, testing.allocator, path, 1024);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings("NEW-COMPLETE", after);
+
+    // 残留仍在原地 —— atomicWrite 不该去动不属于本次调用的临时文件
+    try testing.expect(exists(io, stale));
+}

@@ -6,8 +6,10 @@
 
 **A coding-agent kernel built from scratch in Zig** — in the spirit of Claude Code: it reads and writes code, runs commands, keeps context across turns, and streams everything to the client in real time.
 
-> **本仓库只做内核。** 设计文档（`docs/`）为本机专属，**不随仓库发布**，因此下文不含指向它们的链接。
-> **This repository is the kernel only.** The design documents (`docs/`) live on the author's machine and are **not published with this repository**; no links to them appear below.
+> **本仓库只做内核。** 设计文档（`design/`）为本机专属，**不随仓库发布**，因此下文不含指向它们的链接。
+> 对外文档（协议契约等）在 [`docs/`](docs/)，随仓库公开。
+> **This repository is the kernel only.** The design documents (`design/`) live on the author's machine and are **not published with this repository**; no links to them appear below.
+> Published documents (protocol contract, etc.) live in [`docs/`](docs/).
 
 **AI Agent 请先读 [`AGENTS.md`](AGENTS.md)** —— 背景、已定决策、禁区、阅读顺序都在那里。
 ***AI agents: read [`AGENTS.md`](AGENTS.md) first** — background, settled decisions, no-go zones, reading order.*

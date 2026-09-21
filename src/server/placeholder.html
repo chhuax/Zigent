@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zigent</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #0d1117; color: #c9d1d9;
+    font: 14px/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  main { width: min(760px, 92vw); }
+  h1 { font-size: 20px; margin: 0 0 4px; color: #e6edf3; }
+  .sub { color: #8b949e; margin-bottom: 24px; }
+  .card {
+    border: 1px solid #21262d; border-radius: 8px; padding: 16px 18px;
+    background: #161b22; margin-bottom: 12px;
+  }
+  .ok { color: #3fb950; } .warn { color: #d29922; } .bad { color: #f85149; }
+  code { background: #21262d; padding: 1px 5px; border-radius: 4px; color: #e6edf3; }
+  pre { background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+        padding: 10px 12px; overflow-x: auto; margin: 8px 0 0; }
+  ul { margin: 6px 0 0; padding-left: 20px; } li { color: #8b949e; }
+  li b { color: #c9d1d9; font-weight: 500; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Zigent</h1>
+  <div class="sub">内核已就绪。<b>这个页面是占位页，不是产品 UI。</b></div>
+
+  <div class="card">
+    <div id="health" class="warn">正在探测内核…</div>
+    <pre id="info">—</pre>
+  </div>
+
+  <div class="card">
+    <div><b>连通性自检</b></div>
+    <pre id="probe">—</pre>
+  </div>
+
+  <div class="card">
+    <div><b>UI 还没做，因为设计未到</b></div>
+    <ul>
+      <li>形态已定：<b>Web UI（Tauri 壳随后加）</b>，见 AGENTS.md 已定决策 #2/#3</li>
+      <li>首屏验收已定：<b>浏览器里能对话 + 看工具调用/差异</b>，见 doc 02 §五 W1</li>
+      <li>视觉/键位/主题/diff 呈现是<b>客户端自由区</b>，见 doc 06 §6</li>
+      <li>契约清单：<code>docs/analysis/2026-09-19-20-UI设计输入包.md</code></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div><b>把设计放进来</b></div>
+    <pre>web/index.html      ← 你的设计放这里，内核会自动优先它
+web/assets/…        ← 静态资源</pre>
+    <div class="sub" style="margin:8px 0 0">
+      启动：<code>zig build run -- serve --port 0</code>　（stdout 第一行给出真实端口）
+    </div>
+  </div>
+</main>
+
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const auth = token ? { Authorization: "Bearer " + token } : {};
+
+async function j(path, opts) {
+  const r = await fetch(path, { ...opts, headers: { ...auth, ...(opts?.headers || {}) } });
+  const text = await r.text();
+  return { status: r.status, text };
+}
+
+(async () => {
+  const h = await j("/health");
+  document.getElementById("health").innerHTML = h.status === 200
+    ? '<span class="ok">✓ 内核在线</span> — ' + h.text
+    : '<span class="bad">✗ /health 返回 ' + h.status + "</span>";
+
+  const info = await j("/api/system/info");
+  document.getElementById("info").textContent = info.status + "  " + info.text;
+
+  const s = await j("/api/session");
+  const withoutToken = await j("/api/session", { headers: { Authorization: "" } });
+  document.getElementById("probe").textContent =
+    "POST /api/session 带 token   → " + s.status + "  " + s.text + "\n" +
+    "GET  /api/session 无 token   → " + withoutToken.status + "（应 401）\n" +
+    (token ? "" : "\n提示：URL 加 ?token=… 才能访问需要鉴权的端点。");
+})();
+</script>
+</body>
+</html>

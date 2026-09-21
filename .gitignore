@@ -1,0 +1,20 @@
+# Zig 构建产物（可重建，不入库）
+.zig-cache/
+zig-cache/
+zig-out/
+
+# 验证截图等产物（可重建，不入库）
+output/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# Playwright 临时会话
+.playwright-cli/
+
+# 设计文档与文档站（只在本机可用，不进 git、不公开）
+docs/
+
+# macOS
+.DS_Store

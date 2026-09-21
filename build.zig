@@ -47,6 +47,10 @@ pub fn build(b: *std.Build) void {
         \\fi
         \\echo "guard: OK"
     }).step);
+
+    // guard 必须挂进 test，否则它只是一个"要记得手动跑"的 step ——
+    // 而架构约束一旦靠人记，等于没有。`zig build test` 现在同时跑单测和约束检查。
+    test_step.dependOn(guard);
 }
 
 fn mk(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8) *std.Build.Module {

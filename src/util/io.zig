@@ -157,13 +157,35 @@ pub fn writeFile(io: Io, path: []const u8, bytes: []const u8) !void {
 
 /// 追加写（transcript JSONL 用）。
 ///
-/// 0.16 的 `Io.File` 既没有 `seekTo` 也没有 append 打开模式，
-/// 所以用**定位写**：offset = 当前长度。仍然是 O(1) 追加。
+/// **为什么是"读长度 + 定位写"而不是 O_APPEND**：0.16 的 `Io.File` 既没有
+/// `seekTo`，`OpenFileOptions.Mode` 也只有 `{read_only, write_only, read_write}`
+/// —— 没有 append 模式。所以只能自己取当前长度当 offset。
+///
+/// ⚠️ **`length` + `writePositionalAll` 这两步不是原子的**，必须靠 `lock` 兜底：
+/// 两个写者同时读到同一个 offset，就会把对方的记录**覆盖掉**（不是交错，是丢数据）。
+/// transcript 正好是最可能被并发写的文件，而文档 04 §9 要求
+/// `tool_use` / `tool_result` 成对落盘，丢一条就破坏配对不变量。
+///
+/// `lock = .exclusive` 由 `OpenFileOptions` 提供，在 Darwin/BSD 上**与 open 原子地
+/// 获取**（Linux/Windows 是 open 之后补一次系统调用，仍然安全）。
+///
+/// 📌 **这把锁是 advisory（劝告锁）**：只能挡住同样走这个函数的写者。
+/// 外部进程若直接写同一个文件，锁不会拦它 —— 这是操作系统语义，不是本函数的缺陷。
 pub fn appendFile(io: Io, path: []const u8, bytes: []const u8) !void {
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .write_only }) catch |err| switch (err) {
-        error.FileNotFound => try std.Io.Dir.createFileAbsolute(io, path, .{}),
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{
+        .mode = .write_only,
+        .lock = .exclusive,
+    }) catch |err| switch (err) {
+        // `truncate` 在 CreateFileOptions 里**默认是 true**，追加语义下必须显式关掉：
+        // 从上面 FileNotFound 到这里之间，别的进程可能刚好把文件建好并写了内容，
+        // 默认值会把它清空。
+        error.FileNotFound => try std.Io.Dir.createFileAbsolute(io, path, .{
+            .truncate = false,
+            .lock = .exclusive,
+        }),
         else => return err,
     };
+    // close 会一并释放上面的 advisory 锁，所以临界区正好是 length+write 这一段。
     defer file.close(io);
     const off = try file.length(io);
     try file.writePositionalAll(io, bytes, off);
@@ -337,7 +359,7 @@ pub fn writeStderr(io: Io, bytes: []const u8) void {
 
 pub const Listener = struct {
     server: std.Io.net.Server,
-    /// 实际绑定的端口（`port == 0` 时由本适配层选定）
+    /// 实际绑定的端口（`port == 0` 时为内核分配的临时端口）
     port: u16,
 
     pub fn deinit(self: *Listener, io: Io) void {
@@ -351,32 +373,27 @@ pub const Listener = struct {
 
 /// 起一个**只绑 loopback** 的 TCP 监听。
 ///
-/// ⚠️ **实现说明（与桌面壳交付契约 #1 的差异，必须记录）**：
-/// Zig 0.16 的 `std.Io.net` **没有暴露 `getsockname`**，因此无法在 `port = 0`
-/// 之后从内核问回真实端口。本适配层改为：`port == 0` 时在临时端口区间
-/// （49152–65535）随机试绑，直到成功为止，并把**实际端口**放进 `Listener.port`。
-/// 契约的目的（"不写死端口 + 把真实端口回报到 stdout"）完全满足；
-/// 一旦 `std.Io.net` 补上 `getsockname`，本函数是**唯一**需要改的地方。
+/// `port = 0` 时由内核分配临时端口，`Listener.port` 回报**实际**端口，
+/// 满足交付契约 #1（不写死端口 + 把真实端口回报到 stdout）。
+///
+/// 端口从哪来：`std.Io.net` 确实没有公开 `getsockname`，但**不需要**它——
+/// `netListenIp` 的实现在 `listen` 内部已经调过 `getsockname` 并把结果填进
+/// `Socket.address`（其文档："Contains the resolved ephemeral port number if
+/// requested"）。所以直接读 `server.socket.address` 即可，不要在这里另外去碰
+/// `std.posix`：那是同一个系统调用做第二遍。
+///
+/// 📌 **这里原来是错的，别改回去**：早先的实现以为拿不到内核端口，于是在
+/// 49152–65535 里**随机试绑、失败就换一个、最多 128 次**。三个问题：
+///   1. 会和系统临时端口区间抢占，也会和别的进程竞态；
+///   2. 配合 `reuse_address` 有可能绑到别人正处于 TIME_WAIT 的端口；
+///   3. 换端口那行是 `candidate = 49152 + (candidate + 7919 - 49152) % 16383;`，
+///      `candidate` 是 `u16`，`candidate + 7919` 在 `candidate >= 57617` 时
+///      **整数溢出**。Zig 在 Debug/ReleaseSafe 下溢出是 **panic 而不是环绕**，
+///      于是"端口被占用"这个它本来要处理的场景，约 48% 的概率直接把进程打崩。
 pub fn listenLoopback(io: Io, port: u16) !Listener {
-    if (port != 0) {
-        const addr = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
-        const server = try std.Io.net.IpAddress.listen(&addr, io, .{ .reuse_address = true });
-        return .{ .server = server, .port = port };
-    }
-
-    var seed: [2]u8 = undefined;
-    randomBytes(io, &seed);
-    var candidate: u16 = 49152 + (@as(u16, seed[0]) | (@as(u16, seed[1]) << 8)) % (65535 - 49152);
-    var attempts: usize = 0;
-    while (attempts < 128) : (attempts += 1) {
-        const addr = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.loopback(candidate) };
-        const server = std.Io.net.IpAddress.listen(&addr, io, .{ .reuse_address = true }) catch {
-            candidate = 49152 + (candidate + 7919 - 49152) % (65535 - 49152);
-            continue;
-        };
-        return .{ .server = server, .port = candidate };
-    }
-    return error.NoPortAvailable;
+    const addr = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
+    const server = try std.Io.net.IpAddress.listen(&addr, io, .{ .reuse_address = true });
+    return .{ .server = server, .port = server.socket.address.getPort() };
 }
 
 // ── 测试 ─────────────────────────────────────────────────────────────────────
@@ -470,4 +487,24 @@ test "io: loopback 监听 + 端口 0 回报真实端口" {
     var l2 = try listenLoopback(io, 0);
     defer l2.deinit(io);
     try testing.expect(l2.port != l.port);
+}
+
+test "io: listenLoopback(0) 回报内核分配的真实端口" {
+    // 回归测试：这里曾经在 49152–65535 随机试绑，既有竞态，
+    // 换端口那行还会在 candidate >= 57617 时 u16 溢出 panic。
+    // 现在交给内核分配，直接从 socket.address 读回真实端口。
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l = try listenLoopback(io, 0);
+    defer l.deinit(io);
+
+    // 必须是内核填回来的真实端口，不能还是 0。
+    try testing.expect(l.port != 0);
+
+    // 且这个端口真的能连上 —— 证明回报的不是个随便编的数。
+    const addr = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.loopback(l.port) };
+    var stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+    stream.close(io);
 }

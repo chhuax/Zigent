@@ -238,7 +238,6 @@
 | # | WP | 缺口 | 位置 / 证据 | 严重度 |
 |:--:|---|---|---|:--:|
 | 1 | WP-03.1 | **真实 provider 未跑通**：仅剩「用真实凭据跑 3 轮」这一步。代码级阻塞已全部清除（use-after-free、档位名 `default`、连接未归还、stream-json 输出写坏 —— 见下方「已修复」），本机 mock provider 的真实 HTTP 链路已跑通 | `src/llm/`、`src/engine/loop.zig`、`src/cli/` | 🟠 |
-| 2 | WP-13.3 | 退避 **jitter 定义了却未使用**；cap 30s ≠ 设计要求的 32s | `src/engine/recovery.zig:55-56,173` | 🟠 |
 | 3 | WP-12.6 | 压缩**第三层 LLM 摘要未接线** | `src/engine/loop.zig:547` 传 `null` | 🟠 |
 | 4 | WP-11.1 / 11.4 | 工具**真并发**与**抢跑**均未实现 | `src/engine/tool_exec.zig:126` | 🟠 |
 | 5 | WP-15.1 / 15.4 | `doctor`、6 个 `--internal-*` 未实现（15.2 已实测通过，见下） | `src/cli/args.zig` | 🟡 |
@@ -250,6 +249,7 @@
 | 缺口 | 根因 | 修复 |
 |---|---|---|
 | 流式请求中销毁 client 崩溃 / 每次 `send` 泄漏一个 `std.http.Client` | **连接从未归还连接池** —— std 的 `Request.deinit()` 文档原文是 "Returns the request's `Connection` back to the pool"，而 `sendImpl` 从没调用它（`Response` 没有 deinit） | `defer r.deinit()` + client 提到 `HttpTransport` 持有。实测：exit 0 · 0 条泄漏报告 · stderr 0 行 |
+| 引擎层退避 jitter 从未生效（cap 30s ≠ 设计的 32s） | `recovery.zig` 自己复制了一份参数：cap 用成传输层的 30s，`DEFAULT_JITTER = 0.0` 还被 `_ = DEFAULT_JITTER;` 丢弃 | 改为委托共享的 `llm.RetryPolicy.recovery`；抽出 `delayWithJitter` 让两层共用一份抖动逻辑。新增「采样 32 次不应全相同」的断言 |
 | `--output-format stream-json` 输出错位拼接的碎片 | `File.writer()` 是**定位写**，每次新建句柄都从偏移 0 开始 → 连续 `writeStdout` **互相覆盖**。最小复现：连写 5 行 × 200 字节 → 实际只剩 200 字节 / 1 行 | 改用 `writerStreaming`。修复后一次真实链路产出 **8 行全部合法 JSON** |
 
 **反向发现（代码比设计更严，非缺口）**：危险命令 golden 实际 **67** 条（设计 64）；越界用例实际 **88** 条（设计 23）。

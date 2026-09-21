@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const llm = mk(b, target, optimize, "llm");
     const config = mk(b, target, optimize, "config");
     const perm = mk(b, target, optimize, "perm");
+    const tools = mk(b, target, optimize, "tools");
 
     // L0′ / L0 —— 零内部依赖
     //   注意：这里**故意没有** common.addImport("util", util)。
@@ -30,6 +31,7 @@ pub fn build(b: *std.Build) void {
     //     所以 `tools` 只需要 `common`，不需要 `perm/`（实现）；这样三条流可完全并行。
     //   - `memory` 只做存储，路径由 engine 传入，因此也不依赖 `config`。
     link(perm, &.{ .{ "common", common } });
+    link(tools, &.{ .{ "common", common }, .{ "util", util } });
 
     // ── 测试：**每个模块各自成一个测试产物** ──
     //   这一步是铁律强制的关键：只有把每个模块当测试根，Zig 才会**完整分析它的文件**。
@@ -37,7 +39,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "跑全部模块测试");
     const mods = .{
         .{ "util", util }, .{ "common", common }, .{ "llm", llm }, .{ "config", config },
-        .{ "perm", perm },
+        .{ "perm", perm }, .{ "tools", tools },
     };
     inline for (mods) |m| {
         const t = b.addTest(.{ .root_module = m[1] });

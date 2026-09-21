@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zigent</title>
+<style>
+  /* 简洁工具界面：等宽、紧凑、深色。不是看板。 */
+  :root{
+    color-scheme:dark;
+    --bg:#0b0e14; --panel:#11151c; --line:#1e242e; --line2:#2b323d;
+    --fg:#c9d1d9; --dim:#7d8590; --dim2:#565d66;
+    --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --add:#1f6f3f; --del:#8b2f2f;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.6 var(--mono);
+       display:flex;flex-direction:column;overflow:hidden}
+
+  header{display:flex;align-items:center;gap:10px;padding:8px 14px;
+         border-bottom:1px solid var(--line);background:var(--panel);flex:none}
+  header .dot{width:7px;height:7px;border-radius:50%;background:var(--dim2);flex:none}
+  header .dot.on{background:var(--ok)} header .dot.off{background:var(--bad)}
+  header b{font-weight:600}
+  header .meta{color:var(--dim);font-size:12px;margin-left:auto;display:flex;gap:12px;align-items:center}
+  #cancel{background:transparent;border:1px solid var(--line2);color:var(--dim);
+          border-radius:5px;padding:2px 9px;cursor:pointer;font:inherit;font-size:12px;display:none}
+  #cancel:hover{border-color:var(--bad);color:var(--bad)}
+
+  #stream{flex:1;overflow-y:auto;padding:16px 0 8px;scroll-behavior:smooth}
+  .wrap{max-width:900px;margin:0 auto;padding:0 18px}
+
+  .msg{margin:0 0 14px;white-space:pre-wrap;word-break:break-word}
+  .msg.user{color:var(--accent)}
+  .msg.user .pfx{color:var(--dim2);user-select:none}
+  .msg.asst{color:var(--fg)}
+  .msg.reason{color:var(--dim2);font-size:12px;white-space:pre-wrap}
+  .caret{display:inline-block;width:7px;background:var(--accent);animation:bl 1s steps(1) infinite;vertical-align:-1px}
+  @keyframes bl{50%{opacity:0}}
+
+  .card{border:1px solid var(--line);border-radius:7px;background:var(--panel);margin:0 0 12px;overflow:hidden}
+  .card>.hd{display:flex;align-items:center;gap:8px;padding:6px 11px;cursor:pointer;
+            border-bottom:1px solid var(--line);font-size:12px}
+  .card>.hd .nm{color:var(--fg);font-weight:600}
+  .card>.hd .arg{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .card>.hd .st{flex:none;font-size:11px}
+  .card>.bd{padding:0;max-height:420px;overflow:auto}
+  .card.collapsed>.bd{display:none}
+  .card>.bd pre{margin:0;padding:9px 11px;white-space:pre-wrap;word-break:break-word;
+               font:12px/1.55 var(--mono);color:var(--fg)}
+  .st.run{color:var(--warn)} .st.ok{color:var(--ok)} .st.err{color:var(--bad)}
+
+  /* diff 着色：Edit/Write 的 output 里就是 unified diff（doc 06 §8 决定的去处） */
+  .diff .a{color:#7ee787;background:rgba(63,185,80,.10)}
+  .diff .d{color:#ffa198;background:rgba(248,81,73,.10)}
+  .diff .h{color:var(--accent)}
+  .diff .c{color:var(--dim)}
+
+  .perm{border:1px solid var(--warn);border-radius:7px;background:#1b1608;margin:0 0 12px;overflow:hidden}
+  .perm .hd{padding:7px 12px;border-bottom:1px solid #4a3a12;font-size:12px;display:flex;gap:8px;align-items:center}
+  .perm .risk{font-size:11px;padding:1px 6px;border-radius:3px;background:#3a2c0a;color:var(--warn)}
+  .perm .risk.DESTRUCTIVE,.perm .risk.HIGH{background:#3a1414;color:var(--bad)}
+  .perm .risk.SAFE,.perm .risk.READ_ONLY{background:#0f2a17;color:var(--ok)}
+  .perm pre{margin:0;padding:9px 12px;white-space:pre-wrap;font:12px/1.5 var(--mono);color:var(--dim)}
+  .perm .opts{display:flex;gap:8px;padding:0 12px 11px}
+  .perm button{font:inherit;font-size:12px;padding:3px 11px;border-radius:5px;cursor:pointer;
+               border:1px solid var(--line2);background:#1c2027;color:var(--fg)}
+  .perm button.allow:hover{border-color:var(--ok);color:var(--ok)}
+  .perm button.always:hover{border-color:var(--accent);color:var(--accent)}
+  .perm button.deny:hover{border-color:var(--bad);color:var(--bad)}
+  .perm.done .opts{display:none} .perm.done{opacity:.55}
+
+  .sys{color:var(--dim2);font-size:12px;margin:0 0 12px;display:flex;gap:8px;align-items:center}
+  .sys .rule{flex:1;height:1px;background:var(--line)}
+  .err{color:var(--bad);font-size:12px;margin:0 0 12px}
+
+  footer{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 18px}
+  .inbox{max-width:900px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+  textarea{flex:1;resize:none;background:#0d1117;color:var(--fg);border:1px solid var(--line2);
+           border-radius:7px;padding:8px 10px;font:13px/1.5 var(--mono);min-height:38px;max-height:180px}
+  textarea:focus{outline:none;border-color:var(--accent)}
+  #send{flex:none;background:var(--accent);color:#04121f;border:0;border-radius:7px;
+        padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}
+  #send:disabled{background:var(--line2);color:var(--dim);cursor:default}
+  .hint{max-width:900px;margin:6px auto 0;color:var(--dim2);font-size:11px}
+
+  #gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;
+        justify-content:center;flex-direction:column;gap:14px;padding:24px;text-align:center}
+  #gate .box{max-width:520px;display:flex;flex-direction:column;gap:10px}
+  #gate input{background:#0d1117;border:1px solid var(--line2);color:var(--fg);
+              border-radius:7px;padding:8px 10px;font:inherit}
+  #gate button{background:var(--accent);color:#04121f;border:0;border-radius:7px;padding:9px;font:inherit;font-weight:600;cursor:pointer}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="box">
+    <div style="font-size:15px;font-weight:600">Zigent</div>
+    <div id="gate-msg" style="color:var(--dim);font-size:12px">正在探测内核…</div>
+    <input id="gate-token" type="password" placeholder="粘贴 token（ZIGENT_TOKEN），或直接用 ?token=… 打开" style="display:none">
+    <button id="gate-go" style="display:none">连接</button>
+  </div>
+</div>
+
+<header>
+  <span class="dot" id="dot"></span><b>Zigent</b>
+  <span class="meta">
+    <span id="m-model">—</span><span id="m-cwd">—</span><span id="m-tok">—</span>
+    <button id="cancel">取消</button>
+  </span>
+</header>
+
+<div id="stream"><div class="wrap" id="log"></div></div>
+
+<footer>
+  <div class="inbox">
+    <textarea id="input" rows="1" placeholder="让它干什么？Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="send" disabled>发送</button>
+  </div>
+  <div class="hint" id="hint">未连接</div>
+</footer>
+
+<script>
+"use strict";
+/* ── Zigent Web UI（参考实现，单文件零依赖）──────────────────────────────
+   消费的是 docs/analysis/06-对外协议.md 冻结的那条事件流：
+   7 个端点 + SSE（event: message, data: <信封 JSON>）。
+   散文走「对话区」，工具/权限/错误走卡片 —— 与 CLI 的 stdout/stderr 分工一致。
+   ⚠️ 已知限制：SSE 目前没有 Last-Event-ID，断线重连会丢事件（会在 hint 里提示）。
+────────────────────────────────────────────────────────────────────────── */
+
+const qs = new URLSearchParams(location.search);
+let TOKEN = qs.get("token") || "";
+let SID = null;
+let es = null;
+let busy = false;
+
+const $ = (id) => document.getElementById(id);
+const log = $("log"), stream = $("stream");
+
+/* ── 小工具 ──────────────────────────────────────────────────────────── */
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function scroll() { stream.scrollTop = stream.scrollHeight; }
+function hint(t) { $("hint").textContent = t; }
+function setDot(state) { $("dot").className = "dot " + state; }
+
+async function api(path, opts) {
+  const o = Object.assign({}, opts);
+  o.headers = Object.assign({ Authorization: "Bearer " + TOKEN }, o.headers || {});
+  const r = await fetch(path, o);
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (_) {}
+  return { status: r.status, text, json };
+}
+
+/* ── 渲染：对话 ──────────────────────────────────────────────────────── */
+let curAsst = null;     // 正在流式写入的助手节点
+let curReason = null;
+
+function newAsst() {
+  curAsst = el("div", "msg asst");
+  curAsst.appendChild(el("span", "pfx", ""));
+  log.appendChild(curAsst);
+  return curAsst;
+}
+function appendText(t) {
+  if (!curAsst) newAsst();
+  const caret = curAsst.querySelector(".caret");
+  if (caret) caret.remove();
+  curAsst.appendChild(document.createTextNode(t));
+  curAsst.appendChild(el("span", "caret", " "));
+  scroll();
+}
+function endText() {
+  if (curAsst) { const c = curAsst.querySelector(".caret"); if (c) c.remove(); }
+  curAsst = null; curReason = null;
+}
+
+/* ── 渲染：工具卡片（tool_call → 0..n tool_progress → tool_result）───── */
+const cards = new Map();   // tool_use_id → {root, bd, st}
+
+function toolCard(id, name, inputRaw) {
+  let arg = "";
+  try {
+    const j = JSON.parse(inputRaw);
+    arg = j.file_path || j.path || j.command || j.pattern || j.query || j.prompt || "";
+  } catch (_) { arg = (inputRaw || "").slice(0, 80); }
+
+  const root = el("div", "card");
+  const hd = el("div", "hd");
+  hd.appendChild(el("span", "nm", name));
+  hd.appendChild(el("span", "arg", String(arg).replace(/\s+/g, " ").slice(0, 160)));
+  const st = el("span", "st run", "运行中");
+  hd.appendChild(st);
+  root.appendChild(hd);
+  const bd = el("div", "bd");
+  root.appendChild(bd);
+  hd.onclick = () => root.classList.toggle("collapsed");
+
+  log.appendChild(root);
+  cards.set(id, { root, bd, st });
+  busy = true; $("cancel").style.display = "";
+  scroll();
+  return root;
+}
+
+/** tool_result.output 里可能是一段 unified diff（Edit 的 output 就含 diff）。 */
+function outputNode(s) {
+  const pre = el("pre");
+  const lines = String(s).split("\n");
+  const looksDiff = lines.some(l => l.startsWith("@@") || l.startsWith("+++ ") || l.startsWith("--- "));
+  if (looksDiff) {
+    pre.className = "diff";
+    for (const ln of lines) {
+      const d = el("div");
+      if (ln.startsWith("@@")) d.className = "h";
+      else if (ln.startsWith("+++") || ln.startsWith("---")) d.className = "c";
+      else if (ln.startsWith("+")) d.className = "a";
+      else if (ln.startsWith("-")) d.className = "d";
+      else d.className = "c";
+      d.textContent = ln.length ? ln : " ";
+      pre.appendChild(d);
+    }
+  } else {
+    pre.textContent = s;
+  }
+  return pre;
+}
+
+/* ── 渲染：权限卡片 ──────────────────────────────────────────────────── */
+function permCard(p) {
+  const root = el("div", "perm");
+  const hd = el("div", "hd");
+  hd.appendChild(el("span", "risk " + p.risk_level, p.risk_level || "?"));
+  hd.appendChild(el("span", null, "需要许可：" + p.tool_name));
+  root.appendChild(hd);
+
+  const pre = el("pre");
+  pre.textContent = (p.input_summary || "") + (p.reason ? "\n· " + p.reason : "");
+  root.appendChild(pre);
+
+  const opts = el("div", "opts");
+  const map = { allow_once: "allow", allow_always: "always", reject_once: "deny" };
+  const label = { allow_once: "允许一次", allow_always: "总是允许", reject_once: "拒绝" };
+  for (const o of (p.options || [])) {
+    const b = el("button", map[o.option_id] || "", label[o.option_id] || o.label || o.option_id);
+    b.onclick = async () => {
+      for (const x of opts.querySelectorAll("button")) x.disabled = true;
+      const r = await api(`/api/session/${SID}/permission/${p.request_id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ option_id: o.option_id }),
+      });
+      root.classList.add("done");
+      b.textContent = "→ " + (label[o.option_id] || o.option_id) + (r.status === 200 ? "" : "（失败 " + r.status + "）");
+      scroll();
+    };
+    opts.appendChild(b);
+  }
+  root.appendChild(opts);
+  log.appendChild(root);
+  scroll();
+  hint("⚠ 有权限请求待处理 —— 60 秒内不答内核会按「拒绝」处理");
+}
+
+/* ── 事件分发（信封：{type, uuid, session_id, timestamp, ...}）────────── */
+function onEvent(ev) {
+  switch (ev.type) {
+    case "text_delta": appendText(ev.text); break;
+    case "reasoning_delta":
+      if (!curReason) { curReason = el("div", "msg reason"); log.appendChild(curReason); }
+      curReason.textContent += ev.text; scroll(); break;
+
+    case "tool_call": endText(); toolCard(ev.tool_use_id, ev.tool_name, ev.input); break;
+    case "tool_progress": {
+      const c = cards.get(ev.tool_use_id);
+      if (c && ev.message) c.st.textContent = String(ev.message).slice(0, 40);
+      break;
+    }
+    case "tool_result": {
+      const c = cards.get(ev.tool_use_id);
+      endText();
+      busy = false; $("cancel").style.display = "none";
+      if (c) {
+        c.st.className = "st " + (ev.is_error ? "err" : "ok");
+        c.st.textContent = (ev.is_error ? "失败" : "完成") + " " + (ev.duration_ms || 0) + "ms";
+        c.bd.appendChild(outputNode(ev.output || ""));
+      } else {
+        const n = el("div", "err", "工具结果（无对应卡片）：" + (ev.output || "").slice(0, 200));
+        log.appendChild(n);
+      }
+      scroll(); break;
+    }
+
+    case "permission_request": permCard(ev); break;
+
+    case "error": {
+      endText();
+      const box = el("div", "err");
+      box.textContent = (ev.terminal ? "✗ " : "! ") + ev.message +
+        (ev.terminal ? ` [${ev.error_code}]` : ` [${ev.error_code}] 重试 ${ev.retry_attempt}/${ev.max_retries}，${ev.retry_delay_ms}ms 后`);
+      log.appendChild(box);
+      if (ev.terminal) { busy = false; $("cancel").style.display = "none"; }
+      scroll(); break;
+    }
+
+    case "compact_boundary": {
+      endText();
+      const s = el("div", "sys");
+      s.appendChild(el("span", null, `⋯ 上下文压缩（${ev.kind}）：${ev.before_messages} → ${ev.after_messages} 条消息`));
+      s.appendChild(el("span", "rule"));
+      log.appendChild(s); scroll(); break;
+    }
+
+    case "turn_complete":
+      $("m-tok").textContent = `${(ev.usage && ev.usage.outputTokens) || 0} out · ${ev.duration_ms || 0}ms`;
+      break;
+
+    case "session_started":
+      $("m-model").textContent = ev.model || "(未配置模型)";
+      $("m-cwd").textContent = ev.cwd || "";
+      break;
+
+    case "session_ended":
+      endText();
+      busy = false; $("cancel").style.display = "none"; $("send").disabled = false;
+      hint(`本轮结束：${ev.turn_count} 轮 / ${ev.tool_call_count} 次工具 / ${ev.total_tokens} tokens`);
+      break;
+
+    case "status": hint(ev.message || ""); break;
+    default: break;   // 未知事件必须忽略（前向兼容，协议 §3.1）
+  }
+}
+
+/* ── SSE ─────────────────────────────────────────────────────────────── */
+function connect() {
+  if (es) es.close();
+  es = new EventSource(`/api/session/${SID}/events?token=${encodeURIComponent(TOKEN)}`);
+  es.onopen = () => { setDot("on"); hint("已连接"); };
+  es.onerror = () => {
+    setDot("off");
+    hint("⚠ 连接断开，正在重连…（当前没有 Last-Event-ID，重连可能丢事件）");
+  };
+  es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)); } catch (e) { console.error(e, m.data); } };
+}
+
+/* ── 提交 prompt ─────────────────────────────────────────────────────── */
+async function send() {
+  const box = $("input");
+  const text = box.value.trim();
+  if (!text || busy) return;
+  box.value = ""; box.style.height = "auto";
+
+  endText();
+  const u = el("div", "msg user");
+  u.appendChild(el("span", "pfx", "› "));
+  u.appendChild(document.createTextNode(text));
+  log.appendChild(u); scroll();
+
+  busy = true; $("send").disabled = true; $("cancel").style.display = "";
+  const r = await api(`/api/session/${SID}/prompt`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: text }),
+  });
+  if (r.status !== 200) {
+    const e = el("div", "err", "提交失败（HTTP " + r.status + "）：" + r.text.slice(0, 200));
+    log.appendChild(e); scroll();
+    busy = false; $("send").disabled = false; $("cancel").style.display = "none";
+  }
+}
+
+/* ── 启动 ────────────────────────────────────────────────────────────── */
+async function boot() {
+  const health = await api("/health");
+  if (health.status !== 200) {
+    $("gate-msg").textContent = "内核没响应（" + health.status + "）。确认 `zigent serve` 在跑。";
+    return;
+  }
+  const info = JSON.parse(health.text);
+  $("gate-msg").textContent = `内核在线：${info.status} · ${info.version}`;
+
+  // 需要 token 才能建会话；没有就让他填
+  const probe = await api("/api/session", { method: "POST" });
+  if (probe.status === 401) {
+    $("gate-msg").textContent = "需要 token（除 /health 外所有端点都要）。";
+    $("gate-token").style.display = ""; $("gate-go").style.display = "";
+    $("gate-go").onclick = () => {
+      TOKEN = $("gate-token").value.trim();
+      history.replaceState(null, "", "?token=" + encodeURIComponent(TOKEN));
+      start();
+    };
+    return;
+  }
+  SID = (probe.json && probe.json.sessionId) || null;
+  if (!SID) { $("gate-msg").textContent = "建会话失败：" + probe.text.slice(0, 200); return; }
+  enter();
+}
+
+async function start() {
+  const r = await api("/api/session", { method: "POST" });
+  if (r.status !== 200 || !r.json || !r.json.sessionId) {
+    $("gate-msg").textContent = "token 不对或建会话失败（HTTP " + r.status + "）";
+    return;
+  }
+  SID = r.json.sessionId;
+  enter();
+}
+
+function enter() {
+  $("gate").style.display = "none";
+  connect();
+  $("send").disabled = false;
+  $("input").focus();
+  hint("已连接 · session " + SID);
+}
+
+$("send").onclick = send;
+$("cancel").onclick = async () => {
+  await api(`/api/session/${SID}/cancel`, { method: "POST" });
+  hint("已请求取消…");
+};
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("input").addEventListener("input", (e) => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(e.target.scrollHeight, 180) + "px";
+});
+
+boot();
+</script>
+</body>
+</html>

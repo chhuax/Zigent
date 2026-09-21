@@ -205,12 +205,33 @@ pub const MockTransport = struct {
 
 pub const HttpTransport = struct {
     gpa: Allocator,
+    /// 传输层持有的 HTTP client：生命周期覆盖所有请求，连接池与 TLS 会话可跨请求复用。
+    ///
+    /// ⚠️ 曾经在 `sendImpl` 里每次建一个 client 并**故意不 destroy**
+    /// （因为 `client.deinit()` 会断言 `connection_pool.used.first == null`）。
+    /// 那个断言的真实原因是**连接没归还池子** —— 见 `sendImpl` 里 `r.deinit()` 的注释。
+    /// 归还之后，这里可以安全地持有并释放，不再泄漏。
+    client: ?*std.http.Client = null,
+
     pub fn init(gpa: Allocator) HttpTransport {
         return .{ .gpa = gpa };
     }
 
     pub fn deinit(self: *HttpTransport) void {
-        _ = self;
+        if (self.client) |c| {
+            c.deinit();
+            self.gpa.destroy(c);
+            self.client = null;
+        }
+    }
+
+    /// 懒建并复用同一个 client。
+    fn clientFor(self: *HttpTransport, io: Io) !*std.http.Client {
+        if (self.client) |c| return c;
+        const c = try self.gpa.create(std.http.Client);
+        c.* = .{ .allocator = self.gpa, .io = io };
+        self.client = c;
+        return c;
     }
 
     pub fn transport(self: *HttpTransport) Transport {
@@ -222,20 +243,10 @@ pub const HttpTransport = struct {
     fn sendImpl(ptr: *anyopaque, io: Io, req: *const Request, sink: ChunkSink) anyerror!void {
         const self: *HttpTransport = @ptrCast(@alignCast(ptr));
 
-        // ⚠️ **不要**在这里 `var client = ...; defer client.deinit();`
-        //    首次真网络调用实测崩溃：
-        //      assert(client.connection_pool.used.first == null);  // There are still active requests.
-        //    原因是流式响应体还没收口，client 就被销毁了。
-        //    改为传输层持有：生命周期覆盖所有请求，且连接池/TLS 会话可复用。
-        // 先做**可能失败**的解析，再分配 client —— 否则早期失败路径会漏掉它。
+        // 先做**可能失败**的解析，再取 client —— 早期失败路径不白建
         const uri = std.Uri.parse(req.url) catch return error.InvalidUrl;
 
-        // 堆上建、**故意不 destroy**：在途请求收口前 `client.deinit()` 会断言失败
-        //   assert(client.connection_pool.used.first == null);
-        // 待办：把 client 提到传输层持有（需要用不改 HttpTransport 布局的方式，
-        // 否则 client.zig 的 @fieldParentPtr 会因对齐变化编译失败）。
-        const client = try self.gpa.create(std.http.Client);
-        client.* = .{ .allocator = self.gpa, .io = io };
+        const client = try self.clientFor(io);
 
         var hdrs: std.ArrayListUnmanaged(std.http.Header) = .empty;
         defer hdrs.deinit(self.gpa);
@@ -246,6 +257,12 @@ pub const HttpTransport = struct {
             .keep_alive = false,
             .redirect_behavior = .not_allowed,
         });
+        // ★ **把连接归还连接池**（std 文档原文：Returns the request's `Connection` back
+        //   to the pool of the `Client`）。少了这一句，连接会一直留在池子的 `used`
+        //   链表里，之后任何一次 `client.deinit()` 都会断言：
+        //     assert(client.connection_pool.used.first == null);  // There are still active requests.
+        //   `Response` 没有 deinit —— 连接归 `Request` 管，所以必须 defer 在这里。
+        defer r.deinit();
         try r.sendBodyComplete(@constCast(req.body));
 
         var redirect_buf: [8192]u8 = undefined;

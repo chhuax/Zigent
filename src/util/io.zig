@@ -228,11 +228,31 @@ pub fn isDir(io: Io, path: []const u8) bool {
 }
 
 /// 递归建目录（`mkdir -p`）。
+/// 把绝对路径拆成「可直接 open 的根目录」+「相对该根的剩余部分」。
+///
+/// 📌 **根不能硬编码成 `"/"`**（这里原来就是这么写的）：那在 POSIX 上对，
+/// 在 Windows 上会把 `C:\Users\me` 当成根目录下名为 `C:\Users\me` 的相对路径。
+/// POSIX 的根固定是 `/`；Windows 的根是盘符（`C:\`）或 UNC 共享（`\\srv\share\`），
+/// 由 `diskDesignator` 给出（它在 POSIX 上恒返回空串）。
+///
+/// ⚠️ Windows 分支**未经实机验证**（AGENTS.md 决策 #6：Windows/WSL 延后）。
+/// 它的价值在于形状正确 —— 宁可现在就不做错，也不要留一个静默走错根的实现。
+fn splitAbsoluteRoot(path: []const u8) struct { root: []const u8, rest: []const u8 } {
+    const disk = std.fs.path.diskDesignator(path);
+    if (disk.len == 0) return .{ .root = "/", .rest = std.mem.trimStart(u8, path, "/") };
+    // 根要带上紧跟盘符的那个分隔符（`C:` 与 `C:\` 语义不同：前者是「该盘当前目录」）。
+    const after = path[disk.len..];
+    const rest = std.mem.trimStart(u8, after, "/\\");
+    const root_len = disk.len + (after.len - rest.len);
+    return .{ .root = path[0..root_len], .rest = rest };
+}
+
 pub fn mkdirp(io: Io, path: []const u8) !void {
     if (std.fs.path.isAbsolute(path)) {
-        var root = try std.Io.Dir.openDirAbsolute(io, "/", .{});
+        const split = splitAbsoluteRoot(path);
+        var root = try std.Io.Dir.openDirAbsolute(io, split.root, .{});
         defer root.close(io);
-        try std.Io.Dir.createDirPath(root, io, std.mem.trimStart(u8, path, "/"));
+        try std.Io.Dir.createDirPath(root, io, split.rest);
     } else {
         try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, path);
     }
@@ -245,9 +265,11 @@ pub fn deleteFile(io: Io, path: []const u8) !void {
 /// 递归删除目录树（绝对或相对路径）。
 pub fn removeTree(io: Io, path: []const u8) !void {
     if (std.fs.path.isAbsolute(path)) {
-        var root = try std.Io.Dir.openDirAbsolute(io, "/", .{});
+        // 同 mkdirp：根由 splitAbsoluteRoot 给出，不能硬编码 "/"。
+        const split = splitAbsoluteRoot(path);
+        var root = try std.Io.Dir.openDirAbsolute(io, split.root, .{});
         defer root.close(io);
-        try std.Io.Dir.deleteTree(root, io, std.mem.trimStart(u8, path, "/"));
+        try std.Io.Dir.deleteTree(root, io, split.rest);
     } else {
         try std.Io.Dir.deleteTree(std.Io.Dir.cwd(), io, path);
     }
@@ -303,6 +325,17 @@ pub fn readLine(io: Io, gpa: Allocator, max_bytes: usize) !?[]u8 {
             '\n' => return try out.toOwnedSlice(gpa),
             '\r' => {},
             else => try out.append(gpa, one[0]),
+        }
+    }
+    // 走到这里说明撞上了 max_bytes：必须把这一行**剩下的部分读干净**再返回。
+    // 否则残余字节会留在流里，下一次 readLine 把它们当成新的一行返回 ——
+    // 一条超长输入会被拆成若干条看似合法的输入，对着 stdin 协议就是注入。
+    if (out.items.len >= max_bytes) {
+        while (true) {
+            var one: [1]u8 = undefined;
+            var d: [1][]u8 = .{one[0..]};
+            const n = iface.vtable.readVec(iface, &d) catch break;
+            if (n == 0 or one[0] == '\n') break;
         }
     }
     if (out.items.len == 0) {

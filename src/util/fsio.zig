@@ -21,13 +21,29 @@ pub fn resolve(gpa: Allocator, base: []const u8, path: []const u8) Allocator.Err
     return normalize(gpa, joined);
 }
 
+/// 本平台的路径分隔符集合（供 `tokenizeAny` 用）。
+///
+/// 📌 **不能无条件把 `\` 也当分隔符**（这里原来就是 `"/\\"`）：
+/// POSIX 上 `\` 是**合法的文件名字符**，`/repo/a\b` 是一个名叫 `a\b` 的文件，
+/// 不是 `a` 目录下的 `b`。原来的写法把两者归一化成同一个字符串 ——
+/// 而 `resolveWithin` 正是拿归一化结果做越界判定的，于是两个不同的文件
+/// 在权限层被当成同一个。判定口径与 `std.fs.path.isSep` 保持一致。
+const sep_chars = if (@import("builtin").os.tag == .windows) "/\\" else "/";
+
 /// 词法归一化：折叠 `.` / `..` / 重复分隔符。**不解析符号链接。**
+///
+/// 输出统一用 `/` 作分隔符（Windows API 同样接受 `/`），但**保留盘符/UNC 根**：
+/// `C:\repo\file` → `C:/repo/file`，而不是曾经的 `/C:/repo/file`（那个结果把
+/// 盘符降级成了普通目录名，根被破坏）。
 pub fn normalize(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
     const absolute = std.fs.path.isAbsolute(path);
     var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(gpa);
 
-    var it = std.mem.tokenizeAny(u8, path, "/\\");
+    // POSIX 上 diskDesignator 恒为空串；Windows 上是 `C:` 或 `//server/share`。
+    const disk = std.fs.path.diskDesignator(path);
+
+    var it = std.mem.tokenizeAny(u8, path[disk.len..], sep_chars);
     var parts = std.ArrayListUnmanaged([]const u8).empty;
     defer parts.deinit(gpa);
     while (it.next()) |part| {
@@ -43,11 +59,15 @@ pub fn normalize(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
         try parts.append(gpa, part);
     }
 
+    // 盘符/UNC 根原样保留在最前面，它不是一个可被 `..` 弹出的路径段。
+    try out.appendSlice(gpa, disk);
     if (absolute) try out.append(gpa, '/');
     for (parts.items, 0..) |part, i| {
         if (i > 0) try out.append(gpa, '/');
         try out.appendSlice(gpa, part);
     }
+    // 空结果只在「相对路径且被 `.`/`..` 抵消干净」时出现；有盘符时不能补 `.`，
+    // 否则 `C:` 会变成 `C:.`。
     if (out.items.len == 0) try out.append(gpa, '.');
     return out.toOwnedSlice(gpa);
 }
@@ -440,4 +460,31 @@ test "fsio: resolveWithinReal 在 macOS 的 /tmp 上不误判" {
     const p = try resolveWithinReal(io, testing.allocator, ws, "a.txt");
     defer if (p) |v| testing.allocator.free(v);
     try testing.expect(p != null);
+}
+
+test "fsio: POSIX 上反斜杠是文件名字符，不是分隔符" {
+    // 回归测试：normalize 曾经无条件 tokenizeAny(path, "/\\")，
+    // 把 `/repo/a\b`（一个名叫 a\b 的文件）归一化成 `/repo/a/b`（a 目录下的 b）。
+    // resolveWithin 拿归一化结果做越界判定，两个不同的文件因此在权限层被混为一谈。
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const n = try normalize(testing.allocator, "/repo/a\\b");
+    defer testing.allocator.free(n);
+    try testing.expectEqualStrings("/repo/a\\b", n);
+
+    // 而真正的分隔符仍然要折叠
+    const m = try normalize(testing.allocator, "/repo//x/./y/../z");
+    defer testing.allocator.free(m);
+    try testing.expectEqualStrings("/repo/x/z", m);
+}
+
+test "fsio: 归一化保留盘符根（不把 C: 降级成目录名）" {
+    // 回归测试：`C:\repo\file` 曾被归一化成 `/C:/repo/file` —— 盘符变成了
+    // 根目录下的一个普通目录名，根被破坏。
+    // 注意：diskDesignator 只在 Windows 上识别盘符，所以这条只在 Windows 有意义。
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+
+    const n = try normalize(testing.allocator, "C:\\repo\\file");
+    defer testing.allocator.free(n);
+    try testing.expectEqualStrings("C:/repo/file", n);
 }

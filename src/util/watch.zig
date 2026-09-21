@@ -48,7 +48,13 @@ pub const PollingWatcher = struct {
     last_poll_ms: i64 = 0,
     snapshot: std.StringHashMapUnmanaged(Stamp) = .empty,
 
-    const Stamp = struct { mtime_ms: i64, size: u64 };
+    /// 文件指纹。
+    ///
+    /// 📌 **mtime 用纳秒而不是毫秒**（这里原来是 `mtime_ms: i64`）：
+    /// 截断到毫秒后，同一毫秒内被改写、且大小不变的文件，前后两次快照完全相同，
+    /// 修改会被静默漏报。构建工具和编辑器在一毫秒内连写同一文件很常见。
+    /// `Io.Timestamp.nanoseconds` 是 `i96`，直接用原始精度。
+    const Stamp = struct { mtime_ns: i96, size: u64 };
 
     pub fn init(gpa: Allocator, io: Io, root: []const u8) !*PollingWatcher {
         const self = try gpa.create(PollingWatcher);
@@ -123,7 +129,7 @@ pub const PollingWatcher = struct {
                 return err;
             };
             if (self.snapshot.get(p)) |old| {
-                if (old.mtime_ms != stamp.mtime_ms or old.size != stamp.size) {
+                if (old.mtime_ns != stamp.mtime_ns or old.size != stamp.size) {
                     try events.append(gpa, .{ .path = try gpa.dupe(u8, p), .kind = .modified });
                 }
             } else {
@@ -152,8 +158,7 @@ pub const PollingWatcher = struct {
         const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch return null;
         defer file.close(self.io);
         const st = std.Io.File.stat(file, self.io) catch return null;
-        const mtime_ms: i64 = st.mtime.toMilliseconds();
-        return .{ .mtime_ms = mtime_ms, .size = st.size };
+        return .{ .mtime_ns = st.mtime.nanoseconds, .size = st.size };
     }
 
     /// 建立初始快照。这里**不需要**管 `truncated`：初始快照不完整只会让
@@ -275,4 +280,40 @@ test "watch: 调用方传 arena 时快照不被连带释放" {
     try testing.expect(created_new);
     // 关键断言：old.txt 在第一轮就进快照了，不该被再报一次。
     try testing.expect(!created_old);
+}
+
+test "watch: 同毫秒内同尺寸改写不会漏报" {
+    // 回归测试：Stamp 曾把 mtime 截断到毫秒，同一毫秒内被改写且大小不变的文件
+    // 前后快照完全相同，modified 被静默吞掉。
+    // 这里连续两次写入等长内容，中间不 sleep —— 正是会落在同一毫秒的场景。
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const rnd = try io_mod.randomHex(io, testing.allocator, 6);
+    defer testing.allocator.free(rnd);
+    const dir = try std.fmt.allocPrint(testing.allocator, "/tmp/zigent-ns-{s}", .{rnd});
+    defer testing.allocator.free(dir);
+    defer io_mod.removeTree(io, dir) catch {};
+    try io_mod.mkdirp(io, dir);
+
+    const f = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{dir});
+    defer testing.allocator.free(f);
+    try io_mod.writeFile(io, f, "AAAA");
+
+    const w = try PollingWatcher.init(testing.allocator, io, dir);
+    const erased = w.watcher();
+    defer erased.deinit();
+    w.interval_ms = 0;
+
+    // 等长改写，紧接着 poll —— 文件系统若支持亚毫秒精度，mtime_ns 必然不同
+    try io_mod.writeFile(io, f, "BBBB");
+
+    const evs = try erased.poll(testing.allocator);
+    defer freeEvents(testing.allocator, evs);
+    var saw_modified = false;
+    for (evs) |e| {
+        if (e.kind == .modified and std.mem.endsWith(u8, e.path, "a.txt")) saw_modified = true;
+    }
+    try testing.expect(saw_modified);
 }

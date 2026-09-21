@@ -14,7 +14,6 @@ pub const Result = struct {
     stderr: []u8,
     exit_code: i32,
     signal: ?i32 = null,
-    timed_out: bool = false,
     duration_ms: i64 = 0,
 
     pub fn deinit(self: *Result, gpa: Allocator) void {
@@ -22,8 +21,14 @@ pub const Result = struct {
         gpa.free(self.stderr);
     }
 
+    /// 命令是否成功。
+    ///
+    /// 这里**没有** `timed_out` 字段可判：超时是通过 `error.Timeout` 返回的，
+    /// 根本走不到构造 `Result` 这一步。曾经有个 `timed_out: bool` 字段恒为
+    /// `false`，`ok()` 里的 `!self.timed_out` 因此是死代码，还会误导调用方
+    /// 以为"超时会返回一个 timed_out = true 的 Result"。
     pub fn ok(self: Result) bool {
-        return self.exit_code == 0 and !self.timed_out;
+        return self.exit_code == 0;
     }
 
     /// 合并输出（工具结果常用）。
@@ -78,15 +83,19 @@ pub fn run(io: Io, gpa: Allocator, opts: Options) RunError!Result {
         .stderr = res.stderr,
         .exit_code = exit_code,
         .signal = signal,
-        .timed_out = false,
         .duration_ms = @import("io.zig").monotonicMillis(io) - start,
     };
 }
 
 /// 经过 shell 执行一条命令串（`bash -lc` / PowerShell）。
+///
+/// ⚠️ `opts.argv` 会被**忽略并覆盖**成由 `command` 构造出的 shell argv。
+/// 调用方传 `.{ .argv = &.{}, ... }` 即可 —— `Options.argv` 没有默认值是刻意的：
+/// 给 `run()` 用时它必须显式提供，不能让人不小心执行一个空命令。
 pub fn runShell(io: Io, gpa: Allocator, command: []const u8, opts: Options) RunError!Result {
+    // 必须用 freeArgv：shellArgv 对每个元素都做了 dupe，只 free 外层切片会漏掉它们。
     const argv = try shellArgv(gpa, command);
-    defer gpa.free(argv);
+    defer freeArgv(gpa, argv);
     var o = opts;
     o.argv = argv;
     return run(io, gpa, o);
@@ -192,4 +201,22 @@ test "proc: 非零退出码与 stderr" {
     try testing.expect(!r.ok());
     try testing.expectEqual(@as(i32, 3), r.exit_code);
     try testing.expect(std.mem.indexOf(u8, r.stderr, "oops") != null);
+}
+
+test "proc: runShell 不泄漏 argv 元素" {
+    // 回归测试：runShell 曾经只 `gpa.free(argv)`（释放外层切片），
+    // 而 shellArgv 对每个元素都做了 dupe —— 每次调用漏 3 个字符串（PowerShell 分支 5 个）。
+    // testing.allocator 会在测试结束时报告未释放的分配，所以这个测试**只要泄漏就会失败**，
+    // 不需要额外断言。
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // `opts.argv` 会被 runShell 覆盖，这里传空占位。
+    var r = try runShell(io, testing.allocator, "printf shell-ok", .{ .argv = &.{} });
+    defer r.deinit(testing.allocator);
+    try testing.expect(r.ok());
+    try testing.expectEqualStrings("shell-ok", r.stdout);
 }

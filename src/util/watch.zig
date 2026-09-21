@@ -48,7 +48,13 @@ pub const PollingWatcher = struct {
     last_poll_ms: i64 = 0,
     snapshot: std.StringHashMapUnmanaged(Stamp) = .empty,
 
-    const Stamp = struct { mtime_ms: i64, size: u64 };
+    /// 文件指纹。
+    ///
+    /// 📌 **mtime 用纳秒而不是毫秒**（这里原来是 `mtime_ms: i64`）：
+    /// 截断到毫秒后，同一毫秒内被改写、且大小不变的文件，前后两次快照完全相同，
+    /// 修改会被静默漏报。构建工具和编辑器在一毫秒内连写同一文件很常见。
+    /// `Io.Timestamp.nanoseconds` 是 `i96`，直接用原始精度。
+    const Stamp = struct { mtime_ns: i96, size: u64 };
 
     pub fn init(gpa: Allocator, io: Io, root: []const u8) !*PollingWatcher {
         const self = try gpa.create(PollingWatcher);
@@ -77,30 +83,53 @@ pub const PollingWatcher = struct {
     }
 
     /// 节流：未到间隔直接返回空。
+    ///
+    /// ⚠️ **两个分配器各司其职，不能合并**：
+    ///   - `gpa`（调用方传入）只用于**返还给调用方**的东西：`events` 及其 `path`。
+    ///     调用方可能传 arena，用完即 reset —— 这是合法用法。
+    ///   - `self.gpa` 用于 `snapshot`：它在 poll 返回后**继续存活**到下一轮比对。
+    /// 曾经这里用 `gpa` 分配 `current` 再赋给 `self.snapshot`，调用方一旦传 arena，
+    /// 下一轮 `self.snapshot.get()` 就是 use-after-free。
     pub fn poll(self: *PollingWatcher, gpa: Allocator) ![]Event {
         const now = io_mod.monotonicMillis(self.io);
         if (now - self.last_poll_ms < @as(i64, @intCast(self.interval_ms))) return &.{};
         self.last_poll_ms = now;
 
         var events = std.ArrayListUnmanaged(Event).empty;
-        errdefer events.deinit(gpa);
+        // 出错时 path 也要逐个释放，只 deinit 数组会漏掉已 append 的字符串。
+        errdefer {
+            for (events.items) |e| gpa.free(e.path);
+            events.deinit(gpa);
+        }
 
+        // 快照属于 watcher 自身状态 —— 必须 self.gpa。
         var current = std.StringHashMapUnmanaged(Stamp).empty;
         defer {
             var it = current.iterator();
-            while (it.next()) |e| gpa.free(e.key_ptr.*);
-            current.deinit(gpa);
+            while (it.next()) |e| self.gpa.free(e.key_ptr.*);
+            current.deinit(self.gpa);
         }
 
-        const paths = try fsio.collectFiles(self.io, gpa, self.root, .{});
-        defer fsio.freePaths(gpa, paths);
+        const walk = try fsio.collectFiles(self.io, gpa, self.root, .{});
+        defer fsio.freePaths(gpa, walk.paths);
 
-        for (paths) |p| {
+        // 遍历被 max_entries 截断 → 这一轮的"全量列表"其实不全，拿它去 diff
+        // 会把没看到的文件全判成 deleted、下一轮再全判成 created。
+        // walk 顺序不稳定，所以这种假事件会持续来。宁可这轮不报，也不要报错的。
+        // 注意：快照保持不变，等目录规模回到阈值内自然恢复。
+        if (walk.truncated) return &.{};
+
+        for (walk.paths) |p| {
             const stamp = self.stampOf(p) orelse continue;
-            const key = try gpa.dupe(u8, p);
-            try current.put(gpa, key, stamp);
+            const key = try self.gpa.dupe(u8, p);
+            // 只在 put 失败时释放 key；put 成功后所有权归 current，
+            // 由上面的 defer 统一回收 —— 这里再加 errdefer 会变成双重释放。
+            current.put(self.gpa, key, stamp) catch |err| {
+                self.gpa.free(key);
+                return err;
+            };
             if (self.snapshot.get(p)) |old| {
-                if (old.mtime_ms != stamp.mtime_ms or old.size != stamp.size) {
+                if (old.mtime_ns != stamp.mtime_ns or old.size != stamp.size) {
                     try events.append(gpa, .{ .path = try gpa.dupe(u8, p), .kind = .modified });
                 }
             } else {
@@ -129,16 +158,22 @@ pub const PollingWatcher = struct {
         const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch return null;
         defer file.close(self.io);
         const st = std.Io.File.stat(file, self.io) catch return null;
-        const mtime_ms: i64 = st.mtime.toMilliseconds();
-        return .{ .mtime_ms = mtime_ms, .size = st.size };
+        return .{ .mtime_ns = st.mtime.nanoseconds, .size = st.size };
     }
 
+    /// 建立初始快照。这里**不需要**管 `truncated`：初始快照不完整只会让
+    /// 第一轮 poll 多报几个 created，不会像 poll 里那样产生反复抖动的假事件。
     fn refresh(self: *PollingWatcher) !void {
-        const paths = try fsio.collectFiles(self.io, self.gpa, self.root, .{});
-        defer fsio.freePaths(self.gpa, paths);
-        for (paths) |p| {
+        const walk = try fsio.collectFiles(self.io, self.gpa, self.root, .{});
+        defer fsio.freePaths(self.gpa, walk.paths);
+        for (walk.paths) |p| {
             if (self.stampOf(p)) |s| {
-                try self.snapshot.put(self.gpa, try self.gpa.dupe(u8, p), s);
+                const key = try self.gpa.dupe(u8, p);
+                // 同 poll：只守 put 失败这个窗口，成功后所有权归 snapshot。
+                self.snapshot.put(self.gpa, key, s) catch |err| {
+                    self.gpa.free(key);
+                    return err;
+                };
             }
         }
     }
@@ -188,4 +223,97 @@ test "watch: polling 能观测到新增文件" {
         if (e.kind == .created and std.mem.endsWith(u8, e.path, "new.txt")) saw_created = true;
     }
     try testing.expect(saw_created);
+}
+
+test "watch: 调用方传 arena 时快照不被连带释放" {
+    // 回归测试（跨分配器 use-after-free）：
+    // poll 曾经用**调用方传入的 gpa** 分配 snapshot 的 key，然后把它存进
+    // self.snapshot（长生命周期）。调用方用 arena 是合法用法 —— 接口文档写明
+    // "调用方拥有返回切片" —— 但 arena 一 deinit，snapshot 的 key 就全悬垂了。
+    //
+    // 断言方式不靠"是否崩溃"（UAF 不保证崩），而是看**语义**：
+    // 第二轮 poll 只应该报新建的那一个文件。若 snapshot 已损坏，
+    // 查不到旧文件就会把它再报一次 created。
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const rnd = try io_mod.randomHex(io, testing.allocator, 6);
+    defer testing.allocator.free(rnd);
+    const dir = try std.fmt.allocPrint(testing.allocator, "/tmp/zigent-arena-{s}", .{rnd});
+    defer testing.allocator.free(dir);
+    defer io_mod.removeTree(io, dir) catch {};
+    try io_mod.mkdirp(io, dir);
+
+    const old_f = try std.fmt.allocPrint(testing.allocator, "{s}/old.txt", .{dir});
+    defer testing.allocator.free(old_f);
+    try io_mod.writeFile(io, old_f, "1");
+
+    const w = try PollingWatcher.init(testing.allocator, io, dir);
+    const erased = w.watcher();
+    defer erased.deinit();
+    w.interval_ms = 0; // 关掉节流，否则第二轮会被 500ms 挡掉
+
+    // 第一轮：用 arena 当调用方分配器，然后**整个释放掉**。
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const evs = try erased.poll(arena.allocator());
+        _ = evs; // 内容不重要，重要的是这批内存马上就没了
+    }
+
+    // 第二轮：只有 new.txt 是新的。
+    const new_f = try std.fmt.allocPrint(testing.allocator, "{s}/new.txt", .{dir});
+    defer testing.allocator.free(new_f);
+    try io_mod.writeFile(io, new_f, "2");
+
+    const evs2 = try erased.poll(testing.allocator);
+    defer freeEvents(testing.allocator, evs2);
+
+    var created_old = false;
+    var created_new = false;
+    for (evs2) |e| {
+        if (e.kind != .created) continue;
+        if (std.mem.endsWith(u8, e.path, "old.txt")) created_old = true;
+        if (std.mem.endsWith(u8, e.path, "new.txt")) created_new = true;
+    }
+    try testing.expect(created_new);
+    // 关键断言：old.txt 在第一轮就进快照了，不该被再报一次。
+    try testing.expect(!created_old);
+}
+
+test "watch: 同毫秒内同尺寸改写不会漏报" {
+    // 回归测试：Stamp 曾把 mtime 截断到毫秒，同一毫秒内被改写且大小不变的文件
+    // 前后快照完全相同，modified 被静默吞掉。
+    // 这里连续两次写入等长内容，中间不 sleep —— 正是会落在同一毫秒的场景。
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const rnd = try io_mod.randomHex(io, testing.allocator, 6);
+    defer testing.allocator.free(rnd);
+    const dir = try std.fmt.allocPrint(testing.allocator, "/tmp/zigent-ns-{s}", .{rnd});
+    defer testing.allocator.free(dir);
+    defer io_mod.removeTree(io, dir) catch {};
+    try io_mod.mkdirp(io, dir);
+
+    const f = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{dir});
+    defer testing.allocator.free(f);
+    try io_mod.writeFile(io, f, "AAAA");
+
+    const w = try PollingWatcher.init(testing.allocator, io, dir);
+    const erased = w.watcher();
+    defer erased.deinit();
+    w.interval_ms = 0;
+
+    // 等长改写，紧接着 poll —— 文件系统若支持亚毫秒精度，mtime_ns 必然不同
+    try io_mod.writeFile(io, f, "BBBB");
+
+    const evs = try erased.poll(testing.allocator);
+    defer freeEvents(testing.allocator, evs);
+    var saw_modified = false;
+    for (evs) |e| {
+        if (e.kind == .modified and std.mem.endsWith(u8, e.path, "a.txt")) saw_modified = true;
+    }
+    try testing.expect(saw_modified);
 }

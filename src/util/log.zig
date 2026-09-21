@@ -40,9 +40,7 @@ pub const Logger = struct {
     pub fn log(self: Logger, level: Level, comptime fmt: []const u8, args: anytype) void {
         if (@intFromEnum(level) < @intFromEnum(self.min_level)) return;
         var buf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
-            break :blk buf[0..];
-        };
+        const msg = renderMessage(&buf, fmt, args);
         var line: [4600]u8 = undefined;
         const ts = io_mod.epochMillis(self.io);
         var tsbuf: [64]u8 = undefined;
@@ -73,6 +71,22 @@ fn formatIso(buf: []u8, ms: i64) []const u8 {
     return io_mod.formatIso8601(buf, ms);
 }
 
+/// 消息放不下缓冲区时的替代文本。
+pub const truncated_marker = "<log message truncated>";
+
+/// 把 `fmt`/`args` 渲染进 `buf`；放不下就返回 `truncated_marker`。
+///
+/// 📌 **绝对不能回退成 `buf[0..]`**（这里原来就是这么写的）：
+/// `bufPrint` 失败时**不保证** `buf` 被写满 —— 未写入的部分仍然是 `undefined`。
+/// Zig 的 `undefined` **不是零值**，而是"读它属于未定义行为"的标记，实际内容
+/// 就是这段栈内存上一次被别的调用留下的残留。把整个缓冲区发出去，既让日志变成
+/// 乱码，也等于**把未初始化的栈内存泄露到 stderr**。
+///
+/// 拆成独立函数是为了可测试：`log()` 直接写 stderr，测不到这个分支。
+fn renderMessage(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+    return std.fmt.bufPrint(buf, fmt, args) catch truncated_marker;
+}
+
 const testing = std.testing;
 
 test "log: 级别名与解析" {
@@ -80,6 +94,18 @@ test "log: 级别名与解析" {
     try testing.expectEqual(Level.warn, Level.fromWire("warning"));
     try testing.expectEqual(Level.err, Level.fromWire("ERROR"));
     try testing.expectEqual(Level.info, Level.fromWire("nonsense"));
+}
+
+test "log: 超长消息回退成固定标记，不吐未初始化栈内存" {
+    // 回归测试：曾经这里 `catch break :blk buf[0..]`，会把整个缓冲区（含 undefined
+    // 的未写入部分）当成消息发出去。用一个必然放不下的小 buf 触发失败分支。
+    var small: [8]u8 = undefined;
+    const msg = renderMessage(&small, "{s}", .{"这条消息远远超过八个字节"});
+    try testing.expectEqualStrings(truncated_marker, msg);
+
+    // 放得下时必须正常渲染，别把正常路径也一起"修"坏了。
+    var big: [128]u8 = undefined;
+    try testing.expectEqualStrings("ok 42", renderMessage(&big, "ok {d}", .{42}));
 }
 
 test "log: 低于门槛不输出（不会 panic）" {

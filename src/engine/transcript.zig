@@ -369,6 +369,41 @@ pub const Transcript = struct {
         try out.appendSlice(gpa, collected.items);
         return turn_mod.repairMessages(gpa, out.items);
     }
+
+    /// ★ **分叉（fork）**：把本 transcript 的全部 entry 写到另一个文件，
+    /// **保留 `uuid` 与 `parentUuid`**（消息 id 与链结构逐字不变），只把
+    /// `sessionId` 整体换成 `new_session_id`（文档 13 §T4）。
+    ///
+    /// `messagesAt` 负责「以某个 entry 为叶子重建分叉后的消息链」，
+    /// `forkTo` 负责「把这次分叉落成一份独立的新会话文件」—— 两者合起来才是完整 fork。
+    ///
+    /// `new_path` 必须是**另一个**文件：fork 的语义是产生独立副本，若追加到原文件
+    /// 会让两个会话的 entry 混在一起。目标已存在则覆盖。
+    ///
+    /// ⚠️ 设计里的「附件复制 + metadata 内 `contextRef` 重写」在本实现中**不适用**：
+    /// v1 没有 attachments / compact-contexts 落盘（见 ROADMAP 缺口），无从复制。
+    pub fn forkTo(
+        self: *Transcript,
+        new_session_id: []const u8,
+        new_path: []const u8,
+    ) !void {
+        // 先全部序列化进内存、再一次性写入：fork 到一半失败不会留下半个会话
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.gpa);
+
+        for (self.entries.items) |entry| {
+            var e = entry;
+            e.session_id = new_session_id; // ★ 只改这一项
+            var enc = json.Encoder.init(self.gpa);
+            defer enc.deinit();
+            try e.toJson(&enc);
+            try buf.appendSlice(self.gpa, enc.text());
+            try buf.append(self.gpa, '\n');
+        }
+
+        try util.fsio.ensureParent(self.io, new_path);
+        try util.io.writeFile(self.io, new_path, buf.items);
+    }
 };
 
 /// 生成一个 uuid（无外部依赖：随机字节 + 版本/variant 位）。
@@ -551,4 +586,89 @@ test "transcript: 坏行不拖垮整个会话" {
     defer tr2.deinit();
     const msgs = try tr2.messages(a);
     try testing.expectEqual(@as(usize, 2), msgs.len);
+}
+
+test "transcript: fork 保留 uuid/parentUuid，只改 sessionId" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const src_path = try tmpTranscriptPath(testing.allocator, io);
+    defer testing.allocator.free(src_path);
+    const dir = std.fs.path.dirname(src_path).?;
+    defer util.io.removeTree(io, dir) catch {};
+    const dst_path = try std.fmt.allocPrint(testing.allocator, "{s}/fork.jsonl", .{dir});
+    defer testing.allocator.free(dst_path);
+
+    var src = try Transcript.open(io, testing.allocator, src_path);
+    defer src.deinit();
+    try src.appendTurn(try mkTurn(a, "t1", "第一次"), "sess-orig", "2026-09-19T00:00:00.000Z");
+    try src.appendTurn(try mkTurn(a, "t2", "第二次"), "sess-orig", "2026-09-19T00:00:01.000Z");
+    try testing.expectEqual(@as(usize, 4), src.entries.items.len);
+
+    try src.forkTo("sess-forked", dst_path);
+
+    var dst = try Transcript.open(io, testing.allocator, dst_path);
+    defer dst.deinit();
+
+    // ① entry 数一致
+    try testing.expectEqual(src.entries.items.len, dst.entries.items.len);
+
+    // ② uuid / parentUuid / timestamp 逐条一致；sessionId 全部换掉
+    for (src.entries.items, dst.entries.items) |se, de| {
+        try testing.expectEqualStrings(se.uuid, de.uuid);
+        if (se.parent_uuid) |p| {
+            try testing.expectEqualStrings(p, de.parent_uuid.?);
+        } else {
+            try testing.expect(de.parent_uuid == null);
+        }
+        try testing.expectEqualStrings(se.timestamp, de.timestamp);
+        try testing.expectEqualStrings("sess-orig", se.session_id);
+        try testing.expectEqualStrings("sess-forked", de.session_id);
+    }
+
+    // ③ 链结构没被破坏（fork 后仍能按叶子重建出等长的消息链）
+    const sc = try src.chain(a);
+    const dc = try dst.chain(a);
+    try testing.expectEqual(sc.len, dc.len);
+    const om = try src.messagesAt(a, src.latestLeafUuid().?);
+    const fm = try dst.messagesAt(a, dst.latestLeafUuid().?);
+    try testing.expectEqual(om.len, fm.len);
+}
+
+test "transcript: fork 是独立副本，两边可各自追加" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const src_path = try tmpTranscriptPath(testing.allocator, io);
+    defer testing.allocator.free(src_path);
+    const dir = std.fs.path.dirname(src_path).?;
+    defer util.io.removeTree(io, dir) catch {};
+    const dst_path = try std.fmt.allocPrint(testing.allocator, "{s}/fork.jsonl", .{dir});
+    defer testing.allocator.free(dst_path);
+
+    var src = try Transcript.open(io, testing.allocator, src_path);
+    defer src.deinit();
+    try src.appendTurn(try mkTurn(a, "t1", "源"), "sess-a", "T1");
+    try src.forkTo("sess-b", dst_path);
+
+    // 往分叉里追加，源不受影响
+    var dst = try Transcript.open(io, testing.allocator, dst_path);
+    defer dst.deinit();
+    try dst.appendTurn(try mkTurn(a, "t9", "分叉新增"), "sess-b", "T9");
+
+    try testing.expectEqual(@as(usize, 2), src.entries.items.len);
+    try testing.expectEqual(@as(usize, 4), dst.entries.items.len);
+    // 新追加的那条，其 parent 是分叉里原本的叶子（说明链是接上的，不是重开）
+    try testing.expectEqualStrings(
+        src.entries.items[1].uuid,
+        dst.entries.items[2].parent_uuid.?,
+    );
 }

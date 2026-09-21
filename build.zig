@@ -7,10 +7,11 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    _ = b.standardTargetOptions(.{});
-    _ = b.standardOptimizeOption(.{});
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     // ── 模块表：一层一个 createModule，依赖在下方显式声明 ──
+    const util = mk(b, target, optimize, "util");
 
     // L0′ / L0 —— 零内部依赖
     //   注意：这里**故意没有** common.addImport("util", util)。
@@ -21,7 +22,7 @@ pub fn build(b: *std.Build) void {
     //   否则惰性分析会让「import 了一个未声明的模块」这种越界悄悄溜过去。
     const test_step = b.step("test", "跑全部模块测试");
     const mods = .{
-
+        .{ "util", util },
     };
     inline for (mods) |m| {
         const t = b.addTest(.{ .root_module = m[1] });
